@@ -73,6 +73,137 @@ APP_KEY = "IZjhUeAYwP"
 APP_ID = "3704"
 
 
+# ============================================================
+# 链式 Ogg 合并（不依赖 ffmpeg）
+# ------------------------------------------------------------
+# SAMI 是流式接口：长文本会分成多个**独立的 ogg 逻辑流**返回，
+# 客户端把字节直接拼起来后得到「链式 ogg」(chained ogg)。
+# 绝大多数播放器（包括剪映）只解码第一个逻辑流，于是表现为
+# 「开头有声音，后面全没了」—— 正是分段配音时代的老毛病重现。
+# 下面把多段合并成单一连续流：丢弃后续段的头页、统一 serial、
+# 累加 granulepos、重排序号并重算 CRC。
+# ============================================================
+
+_OGG_CRC_TABLE = []
+for _i in range(256):
+    _r = _i << 24
+    for _ in range(8):
+        _r = ((_r << 1) ^ 0x04C11DB7) & 0xFFFFFFFF if (_r & 0x80000000) else (_r << 1) & 0xFFFFFFFF
+    _OGG_CRC_TABLE.append(_r)
+
+
+def ogg_crc(data: bytes) -> int:
+    """Ogg 页校验和（CRC-32，多项式 0x04c11db7，无反射、初值/终值均为 0）。"""
+    crc = 0
+    for b in data:
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ _OGG_CRC_TABLE[((crc >> 24) & 0xFF) ^ b]
+    return crc
+
+
+def parse_pages(data: bytes) -> list:
+    """扫描出所有 Ogg 页的头部字段与负载。"""
+    pages = []
+    i, n = 0, len(data)
+    while True:
+        i = data.find(b"OggS", i)
+        if i < 0 or i + 27 > n:
+            break
+        flags = data[i + 5]
+        granule = struct.unpack_from("<q", data, i + 6)[0]
+        serial = struct.unpack_from("<I", data, i + 14)[0]
+        seq = struct.unpack_from("<I", data, i + 18)[0]
+        nsegs = data[i + 26]
+        if i + 27 + nsegs > n:
+            break
+        segtbl = data[i + 27:i + 27 + nsegs]
+        body_off = i + 27 + nsegs
+        body_len = sum(segtbl)
+        if body_off + body_len > n:
+            break
+        pages.append({
+            "off": i, "flags": flags, "granule": granule, "serial": serial,
+            "seq": seq, "segtbl": segtbl, "body": data[body_off:body_off + body_len],
+        })
+        i = body_off + body_len
+    return pages
+
+
+def build_page(flags: int, granule: int, serial: int, seq: int, segtbl: bytes, body: bytes) -> bytes:
+    """按给定字段重建一个 Ogg 页（自动计算 CRC）。"""
+    hdr = bytearray(b"OggS")
+    hdr.append(0)
+    hdr.append(flags)
+    hdr += struct.pack("<q", granule)
+    hdr += struct.pack("<I", serial)
+    hdr += struct.pack("<I", seq)
+    hdr += struct.pack("<I", 0)  # CRC 占位
+    hdr.append(len(segtbl))
+    hdr += bytes(segtbl)
+    full = bytes(hdr) + body
+    return full[:22] + struct.pack("<I", ogg_crc(full)) + full[26:]
+
+
+def merge_chained_ogg(data):
+    """把链式 ogg（多个独立逻辑流首尾拼接）合并为单一连续流。
+
+    关键点：
+      - 新的一段以 BOS 标志(0x02)的页开始；除第一段外，其 OpusHead/OpusTags
+        两个头页都要丢弃（但第一段的这两页必须完整保留，OpusTags 是强制的）
+      - granulepos 每段从 0 重新计数，需累加前面各段的总时长
+      - 统一 serial、重排 page sequence、只在首页留 BOS、只在末页留 EOS、重算 CRC
+    """
+    pages = parse_pages(data)
+    if not pages:
+        return data
+
+    serial0 = pages[0]["serial"]
+    out = bytearray()
+    seq = 0
+    offset = 0        # 前面各段累计采样数
+    last_g = 0        # 当前段最后一个有效 granulepos
+    seg_index = -1    # 当前处于第几段
+
+    for p in pages:
+        body = p["body"]
+        is_head = body[:8] == b"OpusHead"
+        is_tags = body[:8] == b"OpusTags"
+
+        if is_head:
+            seg_index += 1
+            if seg_index > 0:
+                offset += last_g   # 结算上一段
+                last_g = 0
+
+        # 非第一段的头页丢弃
+        if (is_head or is_tags) and seg_index > 0:
+            continue
+
+        if is_head or is_tags:
+            g = 0
+        elif p["granule"] >= 0:
+            last_g = p["granule"]
+            g = p["granule"] + offset
+        else:
+            g = -1
+
+        flags = p["flags"] & ~0x06   # 清掉 BOS/EOS，稍后按需补
+        if seq == 0:
+            flags |= 0x02            # 首页 BOS
+
+        out += build_page(flags, g, serial0, seq, p["segtbl"], body)
+        seq += 1
+
+    # 末页补 EOS
+    if out:
+        allp = parse_pages(bytes(out))
+        lp = allp[-1]
+        fixed = build_page(lp["flags"] | 0x04, lp["granule"], serial0,
+                           lp["seq"], lp["segtbl"], lp["body"])
+        out = bytearray(bytes(out)[:lp["off"]]) + fixed
+
+    return bytes(out)
+
+
 def ogg_total_duration_us(path: str) -> int:
     """纯 Python 解析 Ogg 页，返回总时长(微秒)。无需 ffmpeg。
 
@@ -210,8 +341,11 @@ async def _run_sami_tts(text: str, speaker: str, output_file: str, dev_id: str, 
                     audio_data.extend(resp_raw)
 
             if audio_data:
+                # 🔥 关键：SAMI 分多个 ogg 流返回，必须合并成单一连续流，
+                # 否则剪映只播第一段，后面全是空的。
+                merged = merge_chained_ogg(bytes(audio_data))
                 with open(output_file, "wb") as f:
-                    f.write(audio_data)
+                    f.write(merged)
                 return True, output_file
             return False, "No audio"
     except Exception as e:
