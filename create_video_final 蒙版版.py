@@ -300,7 +300,8 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
         print(f"  ✗ 引导语失败: {str(e)[:50]}")
     
     # ========== 添加闪烁发光音效（从0秒开始）==========
-    audio_dir = r"c:\Users\29471\Desktop\create video\jianying\audio"
+    # 🔥 跨平台：音效目录改为脚本同级的 audio/
+    audio_dir = os.path.join(current_dir, "audio")
     ratchet_sfx = os.path.join(audio_dir, "ratchet.wav")
     
     # 如果没有 ratchet.wav，使用 coding.WAV
@@ -416,8 +417,9 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
     return total_opening_duration
 
 # 配置路径（可修改）
-MAPPING_FILE = r'剧本\口播文案_图片序号_对应表.txt'
-IMAGE_DIR = r'image'
+# 🔥 跨平台：以脚本所在目录为基准
+MAPPING_FILE = os.path.join(current_dir, '剧本', '口播文案_图片序号_对应表.txt')
+IMAGE_DIR = os.path.join(current_dir, 'image')
 # 项目名称加时间戳，避免覆盖
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 PROJECT_NAME = f"人生副本_{timestamp}"
@@ -483,6 +485,26 @@ print("这可能需要几分钟，请耐心等待...\n")
 current_time = opening_duration  # 从片头结束时开始
 success_segments = []
 failed_segments = []
+
+# ============================================================
+# 🔥 跨场景配音块合并（与 create_video_final.py 一致）
+# ------------------------------------------------------------
+# 之前每个场景各发一次 TTS，88 个镜头 = 88 次独立合成，
+# 每段都重新起调、句尾收音，听起来一顿一顿。
+# 现在把连续场景合并成 ≤180 字一块，一次合成，
+# 再把真实时长按字数比例分回给每个场景。字幕仍是短句。
+# ============================================================
+import tts_grouping as _tg
+
+_scenes = _tg.prepare_scenes(mappings, find_image_file, IMAGE_DIR, failed_segments)
+_scene_durations, _voice_total, _failed_seqs = _tg.synthesize_groups(
+    project, _scenes, VOICE_SPEAKER, current_time,
+    generate_tts_with_retry, format_time
+)
+for _s in _failed_seqs:
+    failed_segments.append((_s, "", "配音失败"))
+print()
+
 
 for seq, text, img_filename in mappings:
     # 查找图片
@@ -570,34 +592,16 @@ for seq, text, img_filename in mappings:
         
         combined_sentences = final_sentences
         
-        print(f"  场景 {seq:02d}: {len(combined_sentences)} 句话 - {text[:40]}...")
-        
-        # 2. 记录场景开始时间
-        scene_start_time = current_time
-        
-        # 3. 🔥 优化：将空格替换为逗号，让TTS有自然停顿
-        text_for_tts = text.replace(' ', '，')
-        
-        # 4. 🔥 删除语音分割：整段文本直接生成一条完整配音
-        # TTS引擎可以处理长文本，不需要人为分割
-        # 分割会导致语音断断续续（灌灌的）
-        
-        # 生成完整配音（去除末尾的逗号和顿号，避免TTS截断）
-        tts_text = text_for_tts.rstrip('，、')
-        if not tts_text.endswith(('。', '！', '？')):
-            tts_text += '。'  # 如果末尾没有句号，加上句号让TTS知道句子结束
-        
-        audio_seg, total_scene_duration = generate_tts_with_retry(
-            project, tts_text, VOICE_SPEAKER, current_time, "VoiceOver"
-        )
-        
-        if not audio_seg:
-            failed_segments.append((seq, text[:30], "配音失败"))
-            print(f"  X 场景 {seq:02d}: 配音失败")
+        # 🔥 配音已在前面按"配音块"整体合成，这里只取本场景分得的时长
+        if seq in _failed_seqs or seq not in _scene_durations:
+            print(f"  X 场景 {seq:02d}: 配音失败（所属配音块失败）")
             continue
-        
-        print(f"    OK 完整配音: {format_time(total_scene_duration)} (一段连续)")
-        
+
+        total_scene_duration = _scene_durations[seq]
+        scene_start_time = current_time
+        print(f"  场景 {seq:02d}: {len(combined_sentences)} 句话 "
+              f"({format_time(total_scene_duration)}) - {text[:40]}...")
+
         # 5. 🔥 优化：基于语速的字幕时长预估
         # 业界标准：中文TTS约3.5-4字/秒（正常语速）
         # 当前语速1.1倍，约4.4字/秒

@@ -417,7 +417,7 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
     
     print(f"\n[片头·线性蒙版快闪] 开始生成 (5张图片)")
     print(f"  🔥 关键帧间隔10帧，每张图片独立时间段")
-    print(f"  效果：缩放150%→100% + 线性蒙版羽化50%→0%")
+    print(f"  效果：缩放150%→100% + 蒙版Y位移 {MASK_KF_START_PX:+.0f}px→{MASK_KF_END_PX:+.0f}px (0→10帧)")
     
     # 1帧 = 1/60秒 = 16667微秒
     one_frame = 16667
@@ -455,19 +455,22 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
                 keyframe_time_1 = 10 * one_frame
                 segment.add_keyframe(KP.uniform_scale, keyframe_time_1, 1.0)
                 
-                # 添加线性蒙版 + 羽化动画
+                # 添加线性蒙版 + 蒙版位移动画
                 try:
                     segment.add_mask(
                         MaskType.线性,
-                        center_y=0.0,
+                        center_y=MASK_KF_START_PX,   # 起始位置与第0帧关键帧一致
                         size=0.8,
                         feather=50.0,
                         invert=False
                     )
-                    
-                    # 羽化动画（10帧内完成）
-                    segment.add_keyframe(KP.mask_feather, 0, 0.5)
-                    segment.add_keyframe(KP.mask_feather, keyframe_time_1, 0.0)
+
+                    # 🔥 蒙版位置Y关键帧：0帧=+100px，10帧=-400px（自上而下扫过）
+                    # add_mask 内部把像素换算成"占半个素材高"的归一化值，
+                    # 关键帧必须用同一套单位，否则位移量对不上。
+                    half_h = segment.material_size[1] / 2
+                    segment.add_keyframe(KP.mask_center_y, 0, MASK_KF_START_PX / half_h)
+                    segment.add_keyframe(KP.mask_center_y, keyframe_time_1, MASK_KF_END_PX / half_h)
                     
                     frame_start_num = i * 11
                     frame_end_num = frame_start_num + 10
@@ -489,11 +492,16 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
     print(f"  · 快闪图片: 5张，关键帧间隔10帧，独立轨道叠加")
     print(f"  · 图1: 帧0-10，图2: 帧11-20，图3: 帧21-30，图4: 帧31-40，图5: 帧41-50")
     print(f"  · 关键帧: 每张图片相对自己开始时间的0-10帧")
-    print(f"  · 蒙版动画: 缩放150%→100% + 羽化50%→0%")
+    print(f"  · 蒙版动画: 缩放150%→100% + 蒙版Y {MASK_KF_START_PX:+.0f}px→{MASK_KF_END_PX:+.0f}px")
     print(f"  · 音效: 闪烁发光音效")
     print(f"  · 正片内容: 从 {format_time(total_opening_duration)} 开始，主轨道 VideoTrack")
     
     return total_opening_duration
+
+# 🔥 蒙版关键帧参数：第0帧 / 第10帧 的蒙版中心Y位置（单位：像素）
+#    正值在下、负值在上，形成自下而上扫过的揭示效果
+MASK_KF_START_PX = 100.0
+MASK_KF_END_PX = -400.0
 
 # 配置路径（可修改）
 # 🔥 跨平台：以脚本所在目录为基准，Windows/macOS/Linux 通用
