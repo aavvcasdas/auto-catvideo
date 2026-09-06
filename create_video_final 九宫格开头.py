@@ -112,7 +112,7 @@ def format_time(microseconds):
     secs = seconds % 60
     return f"{minutes}:{secs:04.1f}"
 
-def generate_tts_with_retry(project, text, speaker, start_time, track_name, max_retries=3, speed=1.1):
+def generate_tts_with_retry(project, text, speaker, start_time, track_name, max_retries=3, speed=1.05):
     """
     生成TTS音频，失败时重试
     🔥 优化：启用 fallback、增加重试次数、音频规范化、语速调整
@@ -318,12 +318,12 @@ def add_grid_opening(project, image_dir, duration=2000000, first_scene_image=Non
         )
         
         if audio_seg:
-            # 🔥 设置语速1.1倍
-            audio_seg.speed.speed = speed
+            # 🔥 设置语速1.05倍（此处在函数外，之前误用了未定义的变量 speed）
+            audio_seg.speed.speed = 1.05
             
             # 计算实际时长（原时长 / 语速）
             original_duration = audio_seg.target_timerange.duration
-            actual_duration = int(original_duration / 1.1)
+            actual_duration = int(original_duration / 1.05)
             
             # 更新目标时间范围
             from pyJianYingDraft.time_util import Timerange
@@ -336,7 +336,7 @@ def add_grid_opening(project, image_dir, duration=2000000, first_scene_image=Non
             if actual_duration != duration:
                 duration = actual_duration
             
-            print(f"  OK 片头配音已生成: {format_time(actual_duration)} (1.1倍速)")
+            print(f"  OK 片头配音已生成: {format_time(actual_duration)} (1.05倍速)")
     except Exception as e:
         print(f"  X 片头配音失败: {str(e)[:50]}")
     
@@ -347,7 +347,7 @@ def add_grid_opening(project, image_dir, duration=2000000, first_scene_image=Non
             start_time=0,
             duration=duration,
             track_name="OpeningTitle",
-            font=FontType.新青年体,
+            font=FontType.优设标题黑,
             style=draft.TextStyle(size=8.0, letter_spacing=1),  # 大字号 + 字间距1
             border=draft.TextBorder(color=(0.0, 0.0, 0.0), alpha=1.0, width=50.0),  # 粗描边
             clip_settings=draft.ClipSettings(transform_y=0.0)  # 居中位置
@@ -361,8 +361,9 @@ def add_grid_opening(project, image_dir, duration=2000000, first_scene_image=Non
     return duration
 
 # 配置路径（可修改）
-MAPPING_FILE = r'剧本\口播文案_图片序号_对应表.txt'
-IMAGE_DIR = r'image'
+# 🔥 跨平台：以脚本所在目录为基准
+MAPPING_FILE = os.path.join(current_dir, '剧本', '口播文案_图片序号_对应表.txt')
+IMAGE_DIR = os.path.join(current_dir, 'image')
 # 项目名称加时间戳，避免覆盖
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 PROJECT_NAME = f"人生副本_{timestamp}"
@@ -431,6 +432,26 @@ current_time = opening_duration  # 从片头结束时开始
 success_segments = []
 failed_segments = []
 
+# ============================================================
+# 🔥 跨场景配音块合并（与 create_video_final.py 一致）
+# ------------------------------------------------------------
+# 之前每个场景各发一次 TTS，88 个镜头 = 88 次独立合成，
+# 每段都重新起调、句尾收音，听起来一顿一顿。
+# 现在把连续场景合并成 ≤180 字一块，一次合成，
+# 再把真实时长按字数比例分回给每个场景。字幕仍是短句。
+# ============================================================
+import tts_grouping as _tg
+
+_scenes = _tg.prepare_scenes(mappings, find_image_file, IMAGE_DIR, failed_segments)
+_scene_durations, _voice_total, _failed_seqs = _tg.synthesize_groups(
+    project, _scenes, VOICE_SPEAKER, current_time,
+    generate_tts_with_retry, format_time
+)
+for _s in _failed_seqs:
+    failed_segments.append((_s, "", "配音失败"))
+print()
+
+
 for seq, text, img_filename in mappings:
     # 查找图片
     img_path = find_image_file(IMAGE_DIR, img_filename)
@@ -468,51 +489,16 @@ for seq, text, img_filename in mappings:
         if not combined_sentences:
             combined_sentences = [text]
         
-        print(f"  场景 {seq:02d}: {len(combined_sentences)} 句话 - {text[:40]}...")
-        
-        # 2. 记录场景开始时间
-        scene_start_time = current_time
-        
-        # 3. 使用递归分割文本（确保每段都不超过25字）
-        text_segments = split_text_recursively(text, max_length=25)
-        num_segments = len(text_segments)
-        
-        if num_segments > 1:
-            print(f"    文案分{num_segments}段生成配音（每段≤25字）")
-        
-        # 4. 逐段生成音频（不加停顿）
-        audio_durations = []
-        current_audio_time = current_time
-        
-        for seg_idx, (segment_text, pause_before) in enumerate(text_segments):
-            # 不再添加停顿，直接连续生成
-            
-            # 生成这一段的配音（去除末尾的逗号和顿号，避免TTS截断）
-            tts_text = segment_text.rstrip('，、')
-            if not tts_text.endswith(('。', '！', '？')):
-                tts_text += '。'  # 如果末尾没有句号，加上句号让TTS知道句子结束
-            
-            audio_seg, duration = generate_tts_with_retry(
-                project, tts_text, VOICE_SPEAKER, current_audio_time, "VoiceOver"
-            )
-            
-            if not audio_seg:
-                failed_segments.append((seq, text[:30], f"第{seg_idx+1}段配音失败"))
-                print(f"  X 场景 {seq:02d}: 第{seg_idx+1}段配音失败")
-                break
-            
-            audio_durations.append(duration)
-            print(f"    OK 第{seg_idx+1}段配音: {format_time(duration)}")
-            current_audio_time += duration
-        
-        # 如果有段失败，跳过整个场景
-        if len(audio_durations) < num_segments:
+        # 🔥 配音已在前面按"配音块"整体合成，这里只取本场景分得的时长
+        if seq in _failed_seqs or seq not in _scene_durations:
+            print(f"  X 场景 {seq:02d}: 配音失败（所属配音块失败）")
             continue
-        
-        # 计算总时长（所有音频之和，不含停顿）
-        total_scene_duration = sum(audio_durations)
-        print(f"    OK 完整配音: {format_time(total_scene_duration)} (分{num_segments}段)")
-        
+
+        total_scene_duration = _scene_durations[seq]
+        scene_start_time = current_time
+        print(f"  场景 {seq:02d}: {len(combined_sentences)} 句话 "
+              f"({format_time(total_scene_duration)}) - {text[:40]}...")
+
         # 5. 根据句子字数比例分配字幕时间
         # 计算每句话的字数（去除标点符号和空格）
         sentence_chars = []
@@ -542,7 +528,7 @@ for seq, text, img_filename in mappings:
                     start_time=subtitle_start,
                     duration=subtitle_duration,
                     track_name="Subtitles",
-                    font=FontType.新青年体,
+                    font=FontType.优设标题黑,
                     style=draft.TextStyle(size=5.0, letter_spacing=1),
                     border=draft.TextBorder(color=(0.0, 0.0, 0.0), alpha=1.0, width=40.0),
                     clip_settings=draft.ClipSettings(transform_y=-0.8)
@@ -629,7 +615,7 @@ for seq, text, img_filename in mappings:
             'image': img_filename,
             'duration': total_scene_duration,
             'sentences': len(combined_sentences),
-            'audio_segments': num_segments
+            'audio_segments': 1  # 配音块整体合成
         })
         
         print(f"  OK 场景 {seq:02d}: 图片持续 {format_time(total_scene_duration)} ({len(combined_sentences)}句)")
@@ -661,7 +647,7 @@ project.add_text_simple(
     start_time=opening_duration,  # 从片头结束后开始
     duration=total_duration - opening_duration,
     track_name="DisclaimerTrack",
-    font=FontType.新青年体,
+    font=FontType.优设标题黑,
     style=draft.TextStyle(size=3.0, alpha=0.8, letter_spacing=1),
     clip_settings=draft.ClipSettings(transform_x=-0.8, transform_y=0.8)
 )
@@ -681,8 +667,8 @@ print(f"总时长:   {format_time(total_duration)}")
 print(f"\n内容统计:")
 print(f"  片头:   5张图片占满屏幕（第5张为剧本第一张） + 居中标题 + 配音 + 九宫格入场")
 print(f"  场景数: {len(success_segments)} 个")
-print(f"  配音:   {VOICE_SPEAKER} (语速1.1倍)")
-print(f"  字体:   江湖体 (字间距1)")
+print(f"  配音:   {VOICE_SPEAKER} (语速1.05倍)")
+print(f"  字体:   优设标题黑 (字间距1)")
 print(f"  字幕:   已去除所有标点符号（包括中文引号）")
 print(f"  同步:   图片、字幕、音频完全一致（包含段间停顿）")
 print(f"  动画:   Ken Burns缩放（1.0 ↔ 1.1）")

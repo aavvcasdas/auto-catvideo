@@ -58,7 +58,10 @@ class MediaOpsMixin:
         try:
             mat = draft.AudioMaterial(media_path)
             phys_duration = mat.duration
-        except Exception:
+        except Exception as e:
+            # 🔥 之前这里静默 return None，上层只能报"配音失败"却看不到原因，
+            # 极难排查（例如 MediaInfo 缺少 opus 解析能力、文件被占用等）。
+            print(f"❌ AudioMaterial 解析失败: {os.path.basename(media_path)} -> {type(e).__name__}: {e}")
             return None
 
         start_us = safe_tim(start_time)

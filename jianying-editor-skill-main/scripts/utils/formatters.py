@@ -19,8 +19,17 @@ def find_draft_content_path(draft_path: str) -> Optional[str]:
 
 # ----------------- 路径自动探测 -----------------
 def get_default_drafts_root() -> str:
-    """自动探测剪映草稿目录 (Windows / macOS 跨平台)"""
+    """自动探测剪映草稿目录 (Windows / macOS 跨平台)
+
+    优先级：环境变量 JY_PROJECTS_ROOT > 平台默认候选路径 > fallback
+    （config.py 早就定义了 projects_root_override，但这里之前没有读取它，
+     导致在非 Windows/macOS 环境或自定义草稿目录下无法运行）
+    """
     import sys as _sys
+
+    override = os.getenv("JY_PROJECTS_ROOT", "").strip()
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
 
     candidates = []
 
