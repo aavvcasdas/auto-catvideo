@@ -1,0 +1,51 @@
+音效文件说明
+=============
+
+当前文件夹: c:\Users\29471\Desktop\create video\jianying\audio
+
+已有文件:
+- coding.WAV (已存在，可作为备用音效)
+
+需要添加的音效:
+- ratchet.wav (棘轮音效，用于快闪效果)
+
+---
+
+如何获取棘轮音效 (ratchet.wav)：
+
+方式1：使用现有 coding.WAV
+  - 脚本会自动使用 coding.WAV 作为备用
+  - 无需额外操作
+
+方式2：下载免费音效
+  - 访问音效网站（如 freesound.org, zapsplat.com）
+  - 搜索关键词：ratchet, mechanical, gear, crank
+  - 下载后重命名为 ratchet.wav
+  - 放到此文件夹
+
+方式3：从 life-sim-video-pipeline 提取（如果有源文件）
+  - 原项目位置：assets/audio/sfx/ratchet.wav
+  - 复制到此文件夹
+
+方式4：使用 AI 生成音效
+  - 使用 ElevenLabs、Suno 等 AI 音效生成工具
+  - 描述：机械棘轮声、齿轮咬合声、短促冲击音效
+  - 导出为 WAV 格式
+
+---
+
+音效要求：
+- 格式：WAV 或 MP3
+- 时长：1-2秒即可（脚本会自动裁剪到1.667秒）
+- 特点：短促、机械感、冲击感强
+- 音量：中等音量（脚本会自动混音）
+
+---
+
+使用说明：
+1. 将音效文件命名为 ratchet.wav
+2. 放到此文件夹（c:\Users\29471\Desktop\create video\jianying\audio\）
+3. 运行 create_video_final.py
+4. 脚本会自动检测并添加音效
+
+如果没有 ratchet.wav，脚本会自动使用 coding.WAV 作为备用音效。
