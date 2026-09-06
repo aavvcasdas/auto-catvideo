@@ -419,8 +419,12 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
     print(f"  🔥 关键帧间隔10帧，每张图片独立时间段")
     print(f"  效果：缩放150%→100% + 蒙版Y位移 {MASK_KF_START_PX:+.0f}px→{MASK_KF_END_PX:+.0f}px (0→10帧)")
     
-    # 1帧 = 1/60秒 = 16667微秒
-    one_frame = 16667
+    # 🔥 修复：帧长必须按草稿真实帧率算。
+    # 之前写死 16667us(=60fps)，但草稿实际是 30fps(1帧=33333us)，
+    # 于是"10帧"只走了真实的 5 帧 —— 蒙版位移在 0.167 秒内跑完，
+    # 幅度看起来几乎没有，表现为"关键帧没加上"。
+    project_fps = getattr(project.script, "fps", 30) or 30
+    one_frame = int(round(1_000_000 / project_fps))
     
     for i, img_name in enumerate(flash_images):
         img_path = find_image_file(image_dir, img_name)
@@ -932,7 +936,7 @@ print(f"  · 片头快闪现已包含蒙版羽化效果")
 print(f"  · 羽化动画: 50% → 0% (10帧逐渐清晰)")
 print(f"  · 缩放动画: 150% → 100% (10帧放大入场)")
 print(f"\n📐 技术参数:")
-print(f"  · 关键帧时长: 10帧 (约167ms @ 60fps)")
+print(f"  · 关键帧时长: 10帧 (按草稿真实帧率换算)")
 print(f"  · 羽化效果: 从模糊到锐利")
 print(f"  · material_id: 自动关联蒙版对象ID")
 
