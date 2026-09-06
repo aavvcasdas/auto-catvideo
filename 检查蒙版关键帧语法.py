@@ -44,6 +44,14 @@ def load_draft(path):
     return None, None
 
 
+# 本工具生成的草稿名前缀（这些是我们自己写的，不能用来当"剪映的真实写法"）
+OUR_OWN_PREFIXES = ("人生副本_",)
+
+
+def looks_like_ours(name):
+    return any(name.startswith(p) for p in OUR_OWN_PREFIXES)
+
+
 def inspect(draft_dir):
     j, f = load_draft(draft_dir)
     if not j:
@@ -54,8 +62,15 @@ def inspect(draft_dir):
     if not masks:
         return False
 
+    name = os.path.basename(draft_dir)
+    ours = looks_like_ours(name)
+
     print("=" * 70)
-    print(f"草稿: {os.path.basename(draft_dir)}")
+    if ours:
+        print("⚠️  警告：这个草稿是本工具自己生成的，不能作为剪映语法的依据！")
+        print("    请在剪映里【手动】做一个蒙版关键帧，再指定那个草稿名运行本脚本。")
+        print("-" * 70)
+    print(f"草稿: {name}")
     print(f"文件: {os.path.basename(f)}")
     print(f"版本: version={j.get('version')} new_version={j.get('new_version')} "
           f"app={j.get('platform', {}).get('app_version')}")
@@ -126,8 +141,15 @@ def main():
         dirs = [os.path.join(root, d) for d in os.listdir(root)
                 if os.path.isdir(os.path.join(root, d))]
         dirs.sort(key=os.path.getmtime, reverse=True)
-        targets = dirs[:10]        # 最近改过的 10 个草稿
-        print("未指定草稿名，扫描最近修改的 10 个草稿，找出含蒙版的那个...\n")
+        # 🔥 排除本工具自己生成的草稿，否则只会读到我们自己写进去的值，
+        #    形成"自己验证自己"的循环，得不到剪映的真实写法。
+        external = [d for d in dirs if not looks_like_ours(os.path.basename(d))]
+        targets = external[:10]
+        print("未指定草稿名，扫描最近修改的草稿（已排除本工具生成的）...\n")
+        if not targets:
+            print("❌ 除了本工具生成的草稿外，没有找到其它草稿。")
+            print("   请在剪映里手动新建一个草稿，加蒙版+位置关键帧，保存后重跑。")
+            print(f"   （已跳过 {len(dirs)} 个本工具生成的草稿）\n")
 
     found = False
     for d in targets:
@@ -142,8 +164,9 @@ def main():
             print(f"  读取失败 {os.path.basename(d)}: {e}")
 
     if not found:
-        print("\n没有找到带蒙版关键帧的草稿。")
-        print("请按文件开头的说明，在剪映里手动做一个蒙版位置关键帧再运行本脚本。")
+        print("\n没有找到带蒙版关键帧的【剪映手工】草稿。")
+        print("请按文件开头的说明操作：剪映里手动做一个蒙版位置关键帧，保存后重跑。")
+        print("提示：可以直接指定草稿名，例如  python 检查蒙版关键帧语法.py 我的测试草稿")
 
 
 if __name__ == "__main__":
