@@ -563,270 +563,299 @@ current_time = opening_duration  # 从片头结束时开始
 success_segments = []
 failed_segments = []
 
+# ============================================================
+# 🔥 关键修复：按「配音块」而不是「场景」来调用 TTS
+# ------------------------------------------------------------
+# 之前配音仍然一段一段的，根源不在字幕逻辑，而在这个主循环本身：
+# 它 for 每个场景各发一次 TTS。本项目对照表平均每镜只有 31 字
+# （最长 58 字），所以 split_text_for_tts 永远只返回 1 块，
+# 88 个镜头 = 88 次独立合成 —— 每镜都被当成一句话重新起调、
+# 句尾收音，拼起来自然一顿一顿。
+#
+# 现在：把连续的多个场景合并成一个「配音块」（≤TTS_GROUP_CHARS 字）
+# 一次性合成，再把这一块的真实时长按字数比例分回给
+# 每个场景（图片时长）和每句字幕。
+# 字幕依然是短句，逐句上屏，完全不受影响。
+# ============================================================
+TTS_GROUP_CHARS = 180        # 每个配音块目标字数（多个场景合并）
+
+
+def _plain(t):
+    """去掉标点和空格，只留可发音的字"""
+    return re.sub(r'[，。！？、"" \u2018\u2019：；…——/\s]', '', t or '')
+
+
+def split_into_subtitles(text):
+    """把一段文案切成短句字幕（保持原有行为：按标点断句）"""
+    text_normalized = re.sub(r'\s*/\s*', '/', text)
+    parts = re.split(r'([，。！？、/])', text_normalized)
+    out = []
+    i = 0
+    while i < len(parts):
+        if parts[i].strip():
+            sentence = parts[i].strip()
+            if i + 1 < len(parts) and parts[i + 1] in '，。！？、/':
+                sentence += parts[i + 1]
+                i += 2
+            else:
+                i += 1
+            if len(sentence) > 1:
+                out.append(sentence)
+        else:
+            i += 1
+    return out or [text]
+
+
+# ---------- 第一步：预处理所有场景 ----------
+scenes = []
 for seq, text, img_filename in mappings:
-    # 查找图片
     img_path = find_image_file(IMAGE_DIR, img_filename)
     if not img_path:
         failed_segments.append((seq, text[:30] if text else "空文案", "图片缺失"))
         continue
-    
-    try:
-        # 如果文案为空，跳过该场景（只有图片没有配音/字幕）
-        if not text or len(text) < 3:
-            print(f"  场景 {seq:02d}: 跳过（无文案）")
-            continue
-        
-        # 1. 🔥 智能分割：≤50字整段TTS+字幕按比例，>50字分段TTS
-        clean_text = re.sub(r'[，。！？、""''：；…——/\s]', '', text)
-        
-        # 先按标点分割字幕（所有场景都需要）
-        text_normalized = re.sub(r'\s*/\s*', '/', text)
-        sentences = re.split(r'([，。！？、/])', text_normalized)
-        combined_sentences = []
-        i = 0
-        while i < len(sentences):
-            if sentences[i].strip():
-                sentence = sentences[i].strip()
-                if i + 1 < len(sentences) and sentences[i + 1] in '，。！？、/':
-                    sentence += sentences[i + 1]
-                    i += 2
-                else:
-                    i += 1
-                if len(sentence) > 1:
-                    combined_sentences.append(sentence)
-            else:
-                i += 1
+    if not text or len(text) < 3:
+        print(f"  场景 {seq:02d}: 跳过（无文案）")
+        continue
+    if not _plain(text):
+        print(f"  场景 {seq:02d}: 跳过（无有效文字）")
+        continue
+    scenes.append({
+        'seq': seq,
+        'text': text,
+        'img': img_filename,
+        'img_path': img_path,
+        'chars': len(_plain(text)),
+        'subs': split_into_subtitles(text),
+    })
 
-        if not combined_sentences:
-            combined_sentences = [text]
-        
-        # 🔥 长文本处理：SAMI 流式接口上限 2000 字符，无需按 25/50 字硬切。
-        #    整段（或尽量少的几大块）一次合成，语气才连贯。
-        tts_chunks = split_text_for_tts(text, TTS_MAX_CHARS)
-        if not tts_chunks:
-            print(f"  场景 {seq:02d}: 跳过（无有效文字）")
-            continue
+# ---------- 第二步：把连续场景合并成配音块 ----------
+groups = []
+cur = []
+cur_chars = 0
+for sc in scenes:
+    if cur and cur_chars + sc['chars'] > TTS_GROUP_CHARS:
+        groups.append(cur)
+        cur, cur_chars = [], 0
+    cur.append(sc)
+    cur_chars += sc['chars']
+if cur:
+    groups.append(cur)
 
-        if len(tts_chunks) == 1:
-            print(f"  场景 {seq:02d}: 整段TTS+{len(combined_sentences)}句字幕 ({len(clean_text)}字) - {text[:40]}...")
+print(f"  📦 {len(scenes)} 个场景合并为 {len(groups)} 个配音块"
+      f"（目标每块≤{TTS_GROUP_CHARS}字，一次合成保证语气连贯）\n")
+
+
+def _clean_for_tts(t):
+    t = t.replace(' ', '')
+    t = re.sub(r'。{2,}', '。', t)
+    if not t.endswith(('。', '！', '？', '…')):
+        t += '。'
+    return t
+
+
+def _alloc(total_duration, weights):
+    """按权重把 total_duration 分配下去，最后一份吃掉取整误差"""
+    s = sum(weights) or 1
+    out, used = [], 0
+    for i, w in enumerate(weights):
+        if i == len(weights) - 1:
+            out.append(total_duration - used)
         else:
-            print(f"  场景 {seq:02d}: 长文案分{len(tts_chunks)}块TTS+{len(combined_sentences)}句字幕 ({len(clean_text)}字) - {text[:40]}...")
+            d = int(total_duration * (w / s))
+            out.append(d)
+            used += d
+    return out
 
-        def _clean_for_tts(t):
-            t = t.replace(' ', '')
-            t = re.sub(r'。{2,}', '。', t)
-            if not t.endswith(('。', '！', '？', '…')):
-                t += '。'
-            return t
 
-        # 逐块生成配音，记录每块的真实时长
-        chunk_results = []      # [(chunk_text, duration)]
-        tts_start_time = current_time
-        for chunk_idx, chunk in enumerate(tts_chunks):
-            audio_seg, seg_duration = generate_tts_with_retry(
-                project, _clean_for_tts(chunk), VOICE_SPEAKER, tts_start_time, "VoiceOver"
-            )
-            if audio_seg:
-                chunk_results.append((chunk, seg_duration))
-                tts_start_time += seg_duration
-            else:
-                print(f"      X 第{chunk_idx+1}块失败: {chunk[:20]}")
+# ---------- 第三步：逐块生成配音，再把时长分回场景/字幕 ----------
+for gi, group in enumerate(groups):
+    group_text = ''.join(sc['text'] for sc in group)
+    group_chars = sum(sc['chars'] for sc in group)
+    seq_range = f"{group[0]['seq']:02d}-{group[-1]['seq']:02d}" if len(group) > 1 else f"{group[0]['seq']:02d}"
 
-        if not chunk_results:
-            failed_segments.append((seq, text[:30], "配音失败"))
-            print(f"  X 场景 {seq:02d}: 配音失败")
-            continue
+    print(f"  配音块 {gi+1}/{len(groups)} [场景 {seq_range}] "
+          f"{len(group)}镜 {group_chars}字 - {group_text[:40]}...")
 
-        total_scene_duration = tts_start_time - current_time
-        if len(chunk_results) == 1:
-            print(f"    ✓ 完整TTS: {format_time(total_scene_duration)} (一次合成，语气连贯)")
-        else:
-            print(f"    ✓ 分块TTS: {format_time(total_scene_duration)} ({len(chunk_results)}块)")
+    # 万一单块仍然超长（对照表某镜特别长），再按句末标点二次切分
+    chunks = split_text_for_tts(group_text, TTS_MAX_CHARS)
 
-        # 字幕对齐：把每块配音的真实时长，按字数比例分给该块内的字幕句
-        def _strip_punct(t):
-            return re.sub(r'[，。！？、"" \u2018\u2019：；…——/\s]', '', t)
-
-        sentence_durations = []
-        cursor = 0                       # 在 combined_sentences 中的游标
-        for chunk, chunk_duration in chunk_results:
-            chunk_plain = _strip_punct(chunk)
-            # 收集属于这一块的字幕句（按累计字数匹配）
-            picked, acc = [], 0
-            while cursor < len(combined_sentences) and acc < len(chunk_plain):
-                s_plain = _strip_punct(combined_sentences[cursor])
-                picked.append((combined_sentences[cursor], len(s_plain)))
-                acc += len(s_plain)
-                cursor += 1
-            if not picked:
-                picked = [(chunk, max(1, len(chunk_plain)))]
-
-            total_chars = sum(c for _, c in picked) or 1
-            used = 0
-            for i_p, (sentence, char_count) in enumerate(picked):
-                if i_p == len(picked) - 1:
-                    d = chunk_duration - used      # 最后一句吃掉取整误差
-                else:
-                    d = int(chunk_duration * (char_count / total_chars))
-                    used += d
-                sentence_durations.append((sentence, d))
-
-        # 兜底：还有没分配到的字幕句
-        if cursor < len(combined_sentences):
-            for sentence in combined_sentences[cursor:]:
-                sentence_durations.append((sentence, 0))
-        sentence_durations = [(s, d) for s, d in sentence_durations if d > 0]
-        if not sentence_durations:
-            sentence_durations = [(text, total_scene_duration)]
-
-        # 2. 🔥 字幕生成：使用分配好的时长
-        
-        # 5. 🔥 修复：统一字幕样式，删除数字高亮（保留动画和背景条）
-        subtitle_start = current_time
-        for sent_idx, (sentence, seg_duration) in enumerate(sentence_durations):
-            # 去除标点符号和空格
-            sentence_no_punct = re.sub(r'[，。！？、""''：；…——/\s]', '', sentence)
-            
-            try:
-                # 🔥 统一样式：所有字幕使用相同大小（5.0）
-                is_first = (len(success_segments) == 0 and sent_idx == 0)
-                
-                if is_first:
-                    # 第一个场景第一句：居中+暖白色+打字机动画
-                    project.add_text_simple(
-                        text=sentence_no_punct,
-                        start_time=subtitle_start,
-                        duration=seg_duration,
-                        track_name="Subtitles",
-                        font=FontType.新青年体,
-                        style=draft.TextStyle(
-                            size=6.0,  # 🔥 统一大小5.0
-                            letter_spacing=1,
-                            color=(1.0, 0.976, 0.945)  # 暖白色
-                        ),
-                        border=draft.TextBorder(color=(0.0, 0.0, 0.0), alpha=0.9, width=3.0),
-                        clip_settings=draft.ClipSettings(transform_y=0.0),  # 居中
-                        # anim_in="复古打字机"  # 🔥 保留打字机动画
-                    )
-                else:
-                    # 其他字幕：常规样式+打字机动画+半透明背景
-                    project.add_text_simple(
-                        text=sentence_no_punct,
-                        start_time=subtitle_start,
-                        duration=seg_duration,
-                        track_name="Subtitles",
-                        font=FontType.新青年体,
-                        style=draft.TextStyle(size=5.0, letter_spacing=1),  # 🔥 统一大小5.0
-                        border=draft.TextBorder(color=(0.0, 0.0, 0.0), alpha=1.0, width=40.0),
-                        clip_settings=draft.ClipSettings(transform_y=-0.8),
-                        # anim_in="复古打字机",  # 🔥 保留打字机动画
-                        background=draft.TextBackground(  # 🔥 保留半透明背景条
-                            color="#000000",
-                            alpha=0.5,
-                            round_radius=0.35
-                        )
-                    )
-                
-                print(f"    OK 第{sent_idx+1}句字幕: {sentence_no_punct[:20]}... ({format_time(seg_duration)})")
-                subtitle_start += seg_duration
-                
-            except Exception as e:
-                print(f"    X 第{sent_idx+1}句字幕失败: {str(e)[:30]}")
-        
-        # 7. 添加图片（持续整个场景，包括停顿）
-        # 🔥 使用片头图1的轨道，让正片接续在图1后面
-        video_seg = project.add_media_safe(
-            media_path=img_path,
-            start_time=current_time,
-            duration=total_scene_duration,
-            track_name="Opening_Flash_1"  # 🔥 使用片头图1的轨道
+    chunk_results = []
+    tts_start_time = current_time
+    for chunk in chunks:
+        audio_seg, seg_duration = generate_tts_with_retry(
+            project, _clean_for_tts(chunk), VOICE_SPEAKER, tts_start_time, "VoiceOver"
         )
-        
-        # 🔥 新增：为第一个场景添加特效（持续1秒）
-        if len(success_segments) == 0:  # 第一个成功的场景
-            # 创建一个1秒的视频片段用于添加特效（独立轨道叠加）
-            effect_duration = 1000000  # 1秒
-            effect_seg = project.add_media_safe(
+        if audio_seg:
+            chunk_results.append(seg_duration)
+            tts_start_time += seg_duration
+        else:
+            print(f"      X 配音块内某段失败: {chunk[:20]}")
+
+    if not chunk_results:
+        for sc in group:
+            failed_segments.append((sc['seq'], sc['text'][:30], "配音失败"))
+        print(f"  X 配音块 {gi+1} 配音失败，跳过 {len(group)} 个场景")
+        continue
+
+    group_duration = tts_start_time - current_time
+    print(f"    ✓ 一次合成 {format_time(group_duration)} "
+          f"({len(chunk_results)}次请求，{len(group)}个镜头共用)")
+
+    # 把整块时长按字数分回每个场景
+    scene_durations = _alloc(group_duration, [sc['chars'] for sc in group])
+
+    for sc, scene_duration in zip(group, scene_durations):
+        seq = sc['seq']
+        text = sc['text']
+        img_path = sc['img_path']
+        img_filename = sc['img']
+        combined_sentences = sc['subs']
+
+        try:
+            # 场景内：把该场景时长按字数分给每句短句字幕
+            sub_weights = [max(1, len(_plain(s))) for s in combined_sentences]
+            sub_durations = _alloc(scene_duration, sub_weights)
+            sentence_durations = [
+                (s, d) for s, d in zip(combined_sentences, sub_durations) if d > 0
+            ]
+            if not sentence_durations:
+                sentence_durations = [(text, scene_duration)]
+
+            total_scene_duration = scene_duration
+
+            # 2. 🔥 字幕生成：短句逐句上屏（保持原样式）
+            subtitle_start = current_time
+            for sent_idx, (sentence, seg_duration) in enumerate(sentence_durations):
+                sentence_no_punct = re.sub(r'[，。！？、""''：；…——/\s]', '', sentence)
+
+                try:
+                    is_first = (len(success_segments) == 0 and sent_idx == 0)
+
+                    if is_first:
+                        # 第一个场景第一句：居中+暖白色
+                        project.add_text_simple(
+                            text=sentence_no_punct,
+                            start_time=subtitle_start,
+                            duration=seg_duration,
+                            track_name="Subtitles",
+                            font=FontType.新青年体,
+                            style=draft.TextStyle(
+                                size=6.0,
+                                letter_spacing=1,
+                                color=(1.0, 0.976, 0.945)
+                            ),
+                            border=draft.TextBorder(color=(0.0, 0.0, 0.0), alpha=0.9, width=3.0),
+                            clip_settings=draft.ClipSettings(transform_y=0.0),
+                        )
+                    else:
+                        # 其他字幕：底部常规样式+半透明背景
+                        project.add_text_simple(
+                            text=sentence_no_punct,
+                            start_time=subtitle_start,
+                            duration=seg_duration,
+                            track_name="Subtitles",
+                            font=FontType.新青年体,
+                            style=draft.TextStyle(size=5.0, letter_spacing=1),
+                            border=draft.TextBorder(color=(0.0, 0.0, 0.0), alpha=1.0, width=40.0),
+                            clip_settings=draft.ClipSettings(transform_y=-0.8),
+                            background=draft.TextBackground(
+                                color="#000000",
+                                alpha=0.5,
+                                round_radius=0.35
+                            )
+                        )
+
+                    print(f"    OK 场景{seq:02d} 第{sent_idx+1}句字幕: {sentence_no_punct[:20]}... ({format_time(seg_duration)})")
+                    subtitle_start += seg_duration
+
+                except Exception as e:
+                    print(f"    X 第{sent_idx+1}句字幕失败: {str(e)[:30]}")
+
+            # 7. 添加图片（持续整个场景）
+            video_seg = project.add_media_safe(
                 media_path=img_path,
                 start_time=current_time,
-                duration=effect_duration,
-                track_name="EffectTrack"  # 特效轨道（叠加在主轨道上）
+                duration=total_scene_duration,
+                track_name="Opening_Flash_1"
             )
-            
-            if effect_seg:
+
+            # 🔥 为第一个场景添加特效（持续1秒）
+            if len(success_segments) == 0:
+                effect_duration = 1000000
+                effect_seg = project.add_media_safe(
+                    media_path=img_path,
+                    start_time=current_time,
+                    duration=effect_duration,
+                    track_name="EffectTrack"
+                )
+
+                if effect_seg:
+                    try:
+                        effect_seg.add_effect(VideoSceneEffectType.幻彩故障)
+                        print(f"    OK 添加幻彩故障特效 (1秒)")
+                    except Exception as e:
+                        print(f"    注意: 幻彩故障特效失败: {str(e)[:30]}")
+
+                    try:
+                        effect_seg.add_effect(VideoSceneEffectType.震动屏闪)
+                        print(f"    OK 添加震动屏闪特效 (1秒)")
+                    except Exception as e:
+                        print(f"    注意: 震动屏闪特效失败: {str(e)[:30]}")
+
+            # 8. 🔥 Ken Burns 动画（缩放 + 平移）
+            if video_seg:
                 try:
-                    # 添加幻彩故障特效
-                    effect_seg.add_effect(VideoSceneEffectType.幻彩故障)
-                    print(f"    OK 添加幻彩故障特效 (1秒)")
+                    if seq % 3 == 0:
+                        video_seg.add_keyframe(KP.uniform_scale, 0, 1.0)
+                        video_seg.add_keyframe(KP.uniform_scale, total_scene_duration, 1.15)
+                        video_seg.add_keyframe(KP.position_x, 0, -0.05)
+                        video_seg.add_keyframe(KP.position_x, total_scene_duration, 0.05)
+                    elif seq % 3 == 1:
+                        video_seg.add_keyframe(KP.uniform_scale, 0, 1.15)
+                        video_seg.add_keyframe(KP.uniform_scale, total_scene_duration, 1.0)
+                        video_seg.add_keyframe(KP.position_x, 0, 0.05)
+                        video_seg.add_keyframe(KP.position_x, total_scene_duration, -0.05)
+                    else:
+                        video_seg.add_keyframe(KP.uniform_scale, 0, 1.0)
+                        video_seg.add_keyframe(KP.uniform_scale, total_scene_duration, 1.1)
+                        video_seg.add_keyframe(KP.position_y, 0, 0.03)
+                        video_seg.add_keyframe(KP.position_y, total_scene_duration, -0.03)
                 except Exception as e:
-                    print(f"    注意: 幻彩故障特效失败: {str(e)[:30]}")
-                
-                try:
-                    # 添加震动屏闪特效
-                    effect_seg.add_effect(VideoSceneEffectType.震动屏闪)
-                    print(f"    OK 添加震动屏闪特效 (1秒)")
-                except Exception as e:
-                    print(f"    注意: 震动屏闪特效失败: {str(e)[:30]}")
-        
-        # 8. 🔥 优化：Ken Burns 动画（缩放 + 平移）
-        if video_seg:
-            try:
-                # 根据场景序号选择不同的动画效果
-                if seq % 3 == 0:
-                    # 🔵 缩放 + 向右平移
-                    video_seg.add_keyframe(KP.uniform_scale, 0, 1.0)
-                    video_seg.add_keyframe(KP.uniform_scale, total_scene_duration, 1.15)
-                    video_seg.add_keyframe(KP.position_x, 0, -0.05)
-                    video_seg.add_keyframe(KP.position_x, total_scene_duration, 0.05)
-                elif seq % 3 == 1:
-                    # 🔴 缩放 + 向左平移
-                    video_seg.add_keyframe(KP.uniform_scale, 0, 1.15)
-                    video_seg.add_keyframe(KP.uniform_scale, total_scene_duration, 1.0)
-                    video_seg.add_keyframe(KP.position_x, 0, 0.05)
-                    video_seg.add_keyframe(KP.position_x, total_scene_duration, -0.05)
-                else:
-                    # 🟢 缩放 + 向上平移
-                    video_seg.add_keyframe(KP.uniform_scale, 0, 1.0)
-                    video_seg.add_keyframe(KP.uniform_scale, total_scene_duration, 1.1)
-                    video_seg.add_keyframe(KP.position_y, 0, 0.03)
-                    video_seg.add_keyframe(KP.position_y, total_scene_duration, -0.03)
-            except Exception as e:
-                # 降级：使用基础动画
-                print(f"    注意: 使用基础Ken Burns")
-                if seq % 2 == 1:
-                    video_seg.add_keyframe(KP.uniform_scale, 0, 1.0)
-                    video_seg.add_keyframe(KP.uniform_scale, total_scene_duration, 1.1)
-                else:
-                    video_seg.add_keyframe(KP.uniform_scale, 0, 1.1)
-                    video_seg.add_keyframe(KP.uniform_scale, total_scene_duration, 1.0)
-        
-        # 更新当前时间
-        current_time += total_scene_duration
-        
-        # 记录成功
-        success_segments.append({
-            'seq': seq,
-            'text': text[:30],
-            'image': img_filename,
-            'duration': total_scene_duration,
-            'sentences': len(combined_sentences)
-        })
-        
-        print(f"  OK 场景 {seq:02d}: 图片持续 {format_time(total_scene_duration)} ({len(combined_sentences)}句)")
-        
-        # 显示进度
-        if len(success_segments) % 5 == 0:
-            print(f"\n  === 进度: {len(success_segments)}/{len(mappings)} 场景 ===\n")
-            
-    except Exception as e:
-        failed_segments.append((seq, text[:30], str(e)[:30]))
-        print(f"  X 场景 {seq:02d} 失败: {str(e)[:50]}")
-        continue
+                    print(f"    注意: 使用基础Ken Burns")
+                    if seq % 2 == 1:
+                        video_seg.add_keyframe(KP.uniform_scale, 0, 1.0)
+                        video_seg.add_keyframe(KP.uniform_scale, total_scene_duration, 1.1)
+                    else:
+                        video_seg.add_keyframe(KP.uniform_scale, 0, 1.1)
+                        video_seg.add_keyframe(KP.uniform_scale, total_scene_duration, 1.0)
+
+            # 更新当前时间
+            current_time += total_scene_duration
+
+            # 记录成功
+            success_segments.append({
+                'seq': seq,
+                'text': text[:30],
+                'image': img_filename,
+                'duration': total_scene_duration,
+                'sentences': len(combined_sentences)
+            })
+
+            print(f"  OK 场景 {seq:02d}: 图片持续 {format_time(total_scene_duration)} ({len(combined_sentences)}句)")
+
+            if len(success_segments) % 5 == 0:
+                print(f"\n  === 进度: {len(success_segments)}/{len(scenes)} 场景 ===\n")
+
+        except Exception as e:
+            failed_segments.append((seq, text[:30], str(e)[:30]))
+            print(f"  X 场景 {seq:02d} 失败: {str(e)[:50]}")
+            current_time += scene_duration
+            continue
 
 total_duration = current_time
 
 print(f"\n视频内容生成完成!")
-print(f"  成功: {len(success_segments)}/{len(mappings)} 场景")
+print(f"  成功: {len(success_segments)}/{len(scenes)} 场景")
 print(f"  失败: {len(failed_segments)} 场景")
 print(f"  总时长: {format_time(total_duration)}")
 
@@ -867,7 +896,8 @@ print(f"          · 蒙版: ✅ 线性蒙版 + 羽化动画（50%→0%）")
 print(f"  场景数: {len(success_segments)} 个")
 print(f"  配音:   {VOICE_SPEAKER} (语速1.1倍)")
 print(f"          · 统一轨道 VoiceOver（自动避让）")
-print(f"          · 整段一次合成（SAMI流式上限2000字符），超{TTS_MAX_CHARS}字才在句末标点处分块")
+print(f"          · 跨场景合并配音：多个镜头合成{TTS_GROUP_CHARS}字一块，一次请求（语气连贯）")
+print(f"          · 字幕仍按标点切短句，按字数比例对齐配音时长")
 print(f"          · 淡入淡出防爆音")
 print(f"  字体:   新青年体 (字间距1)")
 print(f"  字幕:   统一样式（size=5.0），精确同步TTS时长")
