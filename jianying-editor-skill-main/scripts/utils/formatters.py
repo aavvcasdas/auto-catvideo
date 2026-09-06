@@ -212,27 +212,6 @@ def format_srt_time(us: int) -> str:
 # ----------------- FFprobe 工具 -----------------
 
 
-@functools.lru_cache(maxsize=8)
-def _ffprobe_exe() -> Optional[str]:
-    """定位 ffprobe：优先系统 PATH，其次 imageio-ffmpeg 附带的 ffmpeg 同级目录。"""
-    import shutil
-
-    exe = shutil.which("ffprobe")
-    if exe:
-        return exe
-    try:
-        import imageio_ffmpeg
-
-        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        candidate = os.path.join(os.path.dirname(ffmpeg_exe), "ffprobe")
-        if os.path.exists(candidate):
-            return candidate
-        # imageio 只带 ffmpeg，没有 ffprobe 时用 ffmpeg 也能测时长
-        return ffmpeg_exe
-    except Exception:
-        return None
-
-
 @functools.lru_cache(maxsize=128)
 def get_duration_ffprobe_cached(file_path: str) -> float:
     """
@@ -241,33 +220,10 @@ def get_duration_ffprobe_cached(file_path: str) -> float:
     file_path = os.path.abspath(file_path)
     if not os.path.exists(file_path):
         return 0.0
-
-    exe = _ffprobe_exe()
-    if not exe:
-        return 0.0
-
-    # 退化情况：只有 ffmpeg 没有 ffprobe，用 ffmpeg 解码统计真实时长
-    if os.path.basename(exe).startswith("ffmpeg"):
-        try:
-            result = subprocess.run(
-                [exe, "-i", file_path, "-f", "null", "-"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=120,
-            )
-            matches = re.findall(r"time=(\d+):(\d+):(\d+\.?\d*)", result.stdout)
-            if matches:
-                h, m, s = matches[-1]
-                return int(h) * 3600 + int(m) * 60 + float(s)
-        except Exception as e:
-            print(f"⚠️ ffmpeg duration probe failed for {os.path.basename(file_path)}: {e}")
-        return 0.0
-
     try:
         result = subprocess.run(
             [
-                exe,
+                "ffprobe",
                 "-v",
                 "error",
                 "-show_entries",

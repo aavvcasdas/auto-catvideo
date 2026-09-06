@@ -3,7 +3,7 @@ import json
 import os
 import re
 import ssl
-import subprocess
+import struct
 from typing import Optional, Tuple
 
 import websockets
@@ -73,45 +73,60 @@ APP_KEY = "IZjhUeAYwP"
 APP_ID = "3704"
 
 
-def _ffmpeg_exe() -> Optional[str]:
-    """定位可用的 ffmpeg：优先系统 PATH，其次 imageio-ffmpeg 自带的二进制。"""
-    import shutil
+def ogg_total_duration_us(path: str) -> int:
+    """纯 Python 解析 Ogg 页，返回总时长(微秒)。无需 ffmpeg。
 
-    exe = shutil.which("ffmpeg")
-    if exe:
-        return exe
-    try:
-        import imageio_ffmpeg
+    为什么需要它：SAMI 是流式接口，长文本会分多个独立的 ogg 流返回，
+    客户端把字节直接拼接后得到「链式 ogg」(chained ogg)。这种文件能正常
+    播放，但 MediaInfo 只统计第一个流，30 秒的音频会被报成 10 秒，
+    导致时间轴错乱、片段重叠、配音判定失败。
 
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return None
-
-
-def _remux_audio(path: str) -> str:
-    """把流式拼接出来的链式 ogg 重新封装为单一连续流。
-
-    SAMI 对长文本会分多个 ogg 流返回，拼接后 MediaInfo 只认第一个流的时长。
-    重新解码封装成 wav 后时长才正确。失败时原样返回，不影响主流程。
+    Opus 的 granulepos 以 48kHz 计。链式流里每一段都从 0 重新计数，
+    所以遇到 granulepos 回退(或新的 OpusHead)就说明进入下一段，需要累加。
     """
-    exe = _ffmpeg_exe()
-    if not exe or not os.path.exists(path):
-        return path
-
-    fixed = os.path.splitext(path)[0] + "_fixed.wav"
     try:
-        proc = subprocess.run(
-            [exe, "-y", "-loglevel", "error", "-i", path, "-c:a", "pcm_s16le", fixed],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=120,
-        )
-        if proc.returncode == 0 and os.path.exists(fixed) and os.path.getsize(fixed) > 0:
-            return fixed
-        print(f"[!] Remux failed, using raw file: {proc.stderr.decode('utf-8', 'ignore')[:120]}", flush=True)
-    except Exception as e:
-        print(f"[!] Remux exception, using raw file: {e}", flush=True)
-    return path
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return 0
+
+    total_samples = 0
+    last = {}       # serial -> 上一次见到的 granulepos
+    pre_skip = {}   # serial -> 编码器预跳过的采样数
+    i, n = 0, len(data)
+
+    while True:
+        i = data.find(b"OggS", i)
+        if i < 0 or i + 27 > n:
+            break
+        granule = struct.unpack_from("<q", data, i + 6)[0]
+        serial = struct.unpack_from("<I", data, i + 14)[0]
+        nsegs = data[i + 26]
+        if i + 27 + nsegs > n:
+            break
+        seg_table = data[i + 27:i + 27 + nsegs]
+        body = i + 27 + nsegs
+
+        if data[body:body + 8] == b"OpusHead":
+            # 新的一段开始，先结算上一段
+            if serial in last:
+                total_samples += max(0, last.pop(serial) - pre_skip.get(serial, 0))
+            if body + 12 <= n:
+                pre_skip[serial] = struct.unpack_from("<H", data, body + 10)[0]
+
+        if granule >= 0:
+            prev = last.get(serial)
+            if prev is not None and granule < prev:
+                # granulepos 回退 = 进入链式流的下一段
+                total_samples += max(0, prev - pre_skip.get(serial, 0))
+            last[serial] = granule
+
+        i = body + sum(seg_table)
+
+    for serial, g in last.items():
+        total_samples += max(0, g - pre_skip.get(serial, 0))
+
+    return int(total_samples / 48000 * 1_000_000)
 
 
 def _build_ssl_context() -> ssl.SSLContext:
@@ -197,13 +212,7 @@ async def _run_sami_tts(text: str, speaker: str, output_file: str, dev_id: str, 
             if audio_data:
                 with open(output_file, "wb") as f:
                     f.write(audio_data)
-                # 🔥 SAMI 是流式返回：长文本会分成多个独立的 ogg 流，
-                # 直接拼接得到的是"链式 ogg"(chained ogg)。这种文件能播放，
-                # 但 MediaInfo 只会读到**第一个流**的时长（例如 30 秒的音频只报 10 秒），
-                # 导致上层 AudioMaterial 拿到错误时长 / 片段重叠 / 判定失败。
-                # 这里统一重新封装成单一连续流，让时长可被正确解析。
-                fixed = _remux_audio(output_file)
-                return True, fixed
+                return True, output_file
             return False, "No audio"
     except Exception as e:
         return False, str(e)

@@ -229,17 +229,20 @@ class AudioMaterial:
         except (TypeError, ValueError):
             self.duration = 0
 
-        if self.duration <= 0:
+        if self.duration <= 0 or os.path.splitext(path)[1].lower() in (".ogg", ".opus", ".oga"):
+            # 🔥 链式 ogg（流式 TTS 的拼接产物）MediaInfo 只统计第一个流，
+            #    这里用纯 Python 解析全部 Ogg 页取真实总时长（不依赖 ffmpeg）。
             try:
                 import sys as _sys
 
                 _scripts = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                 if _scripts not in _sys.path:
                     _sys.path.insert(0, _scripts)
-                from utils.formatters import get_duration_ffprobe_cached
+                from universal_tts import ogg_total_duration_us
 
-                probed = get_duration_ffprobe_cached(path)
-                self.duration = int(probed * 1e6)
+                probed = ogg_total_duration_us(path)
+                if probed > self.duration:
+                    self.duration = probed
             except Exception:
                 pass
 
