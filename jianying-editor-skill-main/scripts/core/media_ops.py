@@ -58,8 +58,22 @@ class MediaOpsMixin:
         try:
             mat = draft.AudioMaterial(media_path)
             phys_duration = mat.duration
-        except Exception:
+        except Exception as e:
+            # 🔥 之前这里静默 return None，上层只能报"配音失败"却看不到原因，
+            # 极难排查（例如 MediaInfo 缺少 opus 解析能力、文件被占用等）。
+            print(f"❌ AudioMaterial 解析失败: {os.path.basename(media_path)} -> {type(e).__name__}: {e}")
             return None
+
+        # 🔥 兜底：链式 ogg（流式 TTS 拼接产物）等情况下 MediaInfo 只报第一个流的时长。
+        # 用 ffprobe 实测整段时长，明显更长时以 ffprobe 为准，避免音频被截断/时间轴错位。
+        try:
+            ff_dur = get_duration_ffprobe_cached(media_path)
+            ff_us = int(ff_dur * 1000000)
+            if ff_us > 0 and (not phys_duration or ff_us > phys_duration * 1.05):
+                phys_duration = ff_us
+                mat.duration = ff_us
+        except Exception:
+            pass
 
         start_us = safe_tim(start_time)
         actual_duration = self._calculate_duration(duration, phys_duration)

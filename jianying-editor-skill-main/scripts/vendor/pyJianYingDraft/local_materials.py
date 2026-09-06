@@ -216,7 +216,35 @@ class AudioMaterial:
             raise ValueError("音频素材不应包含视频轨道")
         if not len(info.audio_tracks):
             raise ValueError(f"给定的素材文件 {path} 没有音频轨道")
-        self.duration = int(info.audio_tracks[0].duration * 1e3)  # type: ignore
+
+        # 🔥 某些容器（尤其是流式 TTS 产出的 ogg/opus）在部分平台上
+        # MediaInfo 读不到 duration（返回 None）或读到的是字符串，
+        # 直接 int(None * 1e3) 会抛 TypeError，上层只会看到"配音失败"。
+        # 这里做健壮解析，并在拿不到时回退用 ffmpeg 实测。
+        raw_duration = info.audio_tracks[0].duration  # type: ignore
+        if raw_duration is None:
+            raw_duration = getattr(info.general_tracks[0], "duration", None) if info.general_tracks else None
+        try:
+            self.duration = int(float(raw_duration) * 1e3)
+        except (TypeError, ValueError):
+            self.duration = 0
+
+        if self.duration <= 0:
+            try:
+                import sys as _sys
+
+                _scripts = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                if _scripts not in _sys.path:
+                    _sys.path.insert(0, _scripts)
+                from utils.formatters import get_duration_ffprobe_cached
+
+                probed = get_duration_ffprobe_cached(path)
+                self.duration = int(probed * 1e6)
+            except Exception:
+                pass
+
+        if self.duration <= 0:
+            raise ValueError(f"无法确定音频素材时长: {path}")
 
     def export_json(self) -> Dict[str, Any]:
         return {

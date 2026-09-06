@@ -3,6 +3,7 @@ import json
 import os
 import re
 import ssl
+import subprocess
 from typing import Optional, Tuple
 
 import websockets
@@ -70,6 +71,47 @@ def get_jy_local_config() -> Tuple[str, str]:
 
 APP_KEY = "IZjhUeAYwP"
 APP_ID = "3704"
+
+
+def _ffmpeg_exe() -> Optional[str]:
+    """定位可用的 ffmpeg：优先系统 PATH，其次 imageio-ffmpeg 自带的二进制。"""
+    import shutil
+
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def _remux_audio(path: str) -> str:
+    """把流式拼接出来的链式 ogg 重新封装为单一连续流。
+
+    SAMI 对长文本会分多个 ogg 流返回，拼接后 MediaInfo 只认第一个流的时长。
+    重新解码封装成 wav 后时长才正确。失败时原样返回，不影响主流程。
+    """
+    exe = _ffmpeg_exe()
+    if not exe or not os.path.exists(path):
+        return path
+
+    fixed = os.path.splitext(path)[0] + "_fixed.wav"
+    try:
+        proc = subprocess.run(
+            [exe, "-y", "-loglevel", "error", "-i", path, "-c:a", "pcm_s16le", fixed],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=120,
+        )
+        if proc.returncode == 0 and os.path.exists(fixed) and os.path.getsize(fixed) > 0:
+            return fixed
+        print(f"[!] Remux failed, using raw file: {proc.stderr.decode('utf-8', 'ignore')[:120]}", flush=True)
+    except Exception as e:
+        print(f"[!] Remux exception, using raw file: {e}", flush=True)
+    return path
 
 
 def _build_ssl_context() -> ssl.SSLContext:
@@ -155,7 +197,13 @@ async def _run_sami_tts(text: str, speaker: str, output_file: str, dev_id: str, 
             if audio_data:
                 with open(output_file, "wb") as f:
                     f.write(audio_data)
-                return True, output_file
+                # 🔥 SAMI 是流式返回：长文本会分成多个独立的 ogg 流，
+                # 直接拼接得到的是"链式 ogg"(chained ogg)。这种文件能播放，
+                # 但 MediaInfo 只会读到**第一个流**的时长（例如 30 秒的音频只报 10 秒），
+                # 导致上层 AudioMaterial 拿到错误时长 / 片段重叠 / 判定失败。
+                # 这里统一重新封装成单一连续流，让时长可被正确解析。
+                fixed = _remux_audio(output_file)
+                return True, fixed
             return False, "No audio"
     except Exception as e:
         return False, str(e)
