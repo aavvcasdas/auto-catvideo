@@ -384,7 +384,8 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
         print(f"  ✗ 引导语字幕失败: {str(e)[:50]}")
     
     # ========== 添加闪烁发光音效==========
-    audio_dir = r"c:\Users\29471\Desktop\create video\jianying\audio"
+    # 🔥 跨平台：音效目录改为脚本同级的 audio/
+    audio_dir = os.path.join(current_dir, "audio")
     ratchet_sfx = os.path.join(audio_dir, "ratchet.wav")
     
     if not os.path.exists(ratchet_sfx):
@@ -495,8 +496,9 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
     return total_opening_duration
 
 # 配置路径（可修改）
-MAPPING_FILE = r'剧本\口播文案_图片序号_对应表.txt'
-IMAGE_DIR = r'image'
+# 🔥 跨平台：以脚本所在目录为基准，Windows/macOS/Linux 通用
+MAPPING_FILE = os.path.join(current_dir, '剧本', '口播文案_图片序号_对应表.txt')
+IMAGE_DIR = os.path.join(current_dir, 'image')
 # 项目名称加时间戳，避免覆盖
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 PROJECT_NAME = f"人生副本_{timestamp}"
