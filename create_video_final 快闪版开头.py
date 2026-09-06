@@ -112,7 +112,7 @@ def format_time(microseconds):
     secs = seconds % 60
     return f"{minutes}:{secs:04.1f}"
 
-def generate_tts_with_retry(project, text, speaker, start_time, track_name, max_retries=3, speed=1.1):
+def generate_tts_with_retry(project, text, speaker, start_time, track_name, max_retries=3, speed=1.05):
     """
     生成TTS音频，失败时重试
     🔥 优化：启用 fallback、增加重试次数、音频规范化、语速调整
@@ -265,7 +265,7 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
             start_time=0,
             duration=duration_lead,
             track_name="Opening_Lead_Text",
-            font=FontType.江湖体,
+            font=FontType.优设标题黑,
             style=draft.TextStyle(
                 size=9.0,
                 letter_spacing=1,
@@ -286,9 +286,9 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
         )
         
         if audio_seg:
-            # 设置语速1.1倍
-            audio_seg.speed.speed = 1.1
-            actual_duration = int(audio_seg.target_timerange.duration / 1.1)
+            # 设置语速1.05倍
+            audio_seg.speed.speed = 1.05
+            actual_duration = int(audio_seg.target_timerange.duration / 1.05)
             from pyJianYingDraft.time_util import Timerange
             audio_seg.target_timerange = Timerange(audio_seg.target_timerange.start, actual_duration)
             print(f"  ✓ 引导语配音: {format_time(actual_duration)}")
@@ -663,7 +663,7 @@ for seq, text, img_filename in mappings:
                         start_time=subtitle_start,
                         duration=subtitle_duration,
                         track_name="Subtitles",
-                        font=FontType.江湖体,
+                        font=FontType.优设标题黑,
                         style=draft.TextStyle(
                             size=5.8,
                             letter_spacing=1,
@@ -679,7 +679,7 @@ for seq, text, img_filename in mappings:
                         start_time=subtitle_start,
                         duration=subtitle_duration,
                         track_name="Subtitles",
-                        font=FontType.江湖体,
+                        font=FontType.优设标题黑,
                         style=draft.TextStyle(size=5.0, letter_spacing=1),
                         border=draft.TextBorder(color=(0.0, 0.0, 0.0), alpha=1.0, width=40.0),
                         clip_settings=draft.ClipSettings(transform_y=-0.8)
@@ -798,7 +798,7 @@ project.add_text_simple(
     start_time=opening_duration,  # 从片头结束后开始
     duration=total_duration - opening_duration,
     track_name="DisclaimerTrack",
-    font=FontType.江湖体,
+    font=FontType.优设标题黑,
     style=draft.TextStyle(size=3.0, alpha=0.8, letter_spacing=1),
     clip_settings=draft.ClipSettings(transform_x=-0.8, transform_y=0.8)
 )
@@ -821,8 +821,8 @@ print(f"          · 引导语: 1.8秒 (文字+配音，无背景图)")
 print(f"          · 快闪: ~3秒 (17张叠加，关键帧打在下一张开始)")
 print(f"          · 音效: 棘轮音效覆盖整个快闪")
 print(f"  场景数: {len(success_segments)} 个")
-print(f"  配音:   {VOICE_SPEAKER} (语速1.1倍)")
-print(f"  字体:   江湖体 (字间距1)")
+print(f"  配音:   {VOICE_SPEAKER} (语速1.05倍)")
+print(f"  字体:   优设标题黑 (字间距1)")
 print(f"  字幕:   已去除所有标点符号（包括中文引号）")
 print(f"          第一个场景第一句：居中+暖白色 (参考 build_flash.py)")
 print(f"          其他字幕：常规样式（底部）")

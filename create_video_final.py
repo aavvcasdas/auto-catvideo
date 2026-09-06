@@ -167,7 +167,7 @@ def format_time(microseconds):
     secs = seconds % 60
     return f"{minutes}:{secs:04.1f}"
 
-def generate_tts_with_retry(project, text, speaker, start_time, track_name, max_retries=3, speed=1.1):
+def generate_tts_with_retry(project, text, speaker, start_time, track_name, max_retries=3, speed=1.05):
     """
     生成TTS音频，失败时重试
     🔥 优化：删除fallback、增加重试次数、音频规范化、语速调整
@@ -352,9 +352,9 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
         )
         
         if audio_seg:
-            audio_seg.speed.speed = 1.1
+            audio_seg.speed.speed = 1.05
             original_duration = audio_seg.target_timerange.duration
-            actual_lead_duration = int(original_duration / 1.1)
+            actual_lead_duration = int(original_duration / 1.05)
             from pyJianYingDraft.time_util import Timerange
             audio_seg.target_timerange = Timerange(audio_seg.target_timerange.start, actual_lead_duration)
             print(f"  ✓ 引导语配音: {format_time(actual_lead_duration)}")
@@ -370,7 +370,7 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
             start_time=0,
             duration=actual_lead_duration,
             track_name="Opening_Lead_Text",
-            font=FontType.江湖体,
+            font=FontType.优设标题黑,
             style=draft.TextStyle(
                 size=9.0,
                 letter_spacing=1,
@@ -417,7 +417,7 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
     
     print(f"\n[片头·线性蒙版快闪] 开始生成 (5张图片)")
     print(f"  🔥 关键帧间隔10帧，每张图片独立时间段")
-    print(f"  效果：缩放150%→100% + 蒙版Y位移 {MASK_KF_START_PX:+.0f}px→{MASK_KF_END_PX:+.0f}px (0→10帧)")
+    print(f"  效果：缩放150%→100% + 线性蒙版羽化50%→0%")
     
     # 🔥 修复：帧长必须按草稿真实帧率算。
     # 之前写死 16667us(=60fps)，但草稿实际是 30fps(1帧=33333us)，
@@ -459,36 +459,21 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
                 keyframe_time_1 = 10 * one_frame
                 segment.add_keyframe(KP.uniform_scale, keyframe_time_1, 1.0)
                 
-                # 添加线性蒙版 + 蒙版位移动画
+                # 添加线性蒙版 + 羽化动画（还原为原始实现）
+                # 注：蒙版"位置"关键帧(KFTypeMaskCenterY)实测在剪映里不生效，已移除。
                 try:
                     segment.add_mask(
                         MaskType.线性,
-                        center_y=MASK_KF_START_PX,   # 起始位置（下方 _start 会按上限钳制）
+                        center_y=0.0,
                         size=0.8,
                         feather=50.0,
                         invert=False
                     )
 
-                    # 🔥 蒙版位置Y关键帧（语法已用剪映手工草稿验证：
-                    #    property_type=KFTypeMaskCenterY，挂在 common_keyframes，
-                    #    material_id 指向蒙版素材，值为"占半个素材高"的归一化值）
-                    #
-                    # ⚠️ 归一化值超出 ±1.0 就意味着蒙版中心跑到素材之外，
-                    #    线性蒙版整条分界线离开画面，剩下的时间画面恒亮/恒暗，
-                    #    看起来就是"没有动画"。剪映手工拖动的极限约 ±0.74。
-                    #    所以这里做钳制，避免设了个看不见的值还以为没生效。
-                    half_h = segment.material_size[1] / 2
-                    _raw_start = MASK_KF_START_PX / half_h
-                    _raw_end = MASK_KF_END_PX / half_h
-                    _start = max(-MASK_KF_LIMIT, min(MASK_KF_LIMIT, _raw_start))
-                    _end = max(-MASK_KF_LIMIT, min(MASK_KF_LIMIT, _raw_end))
-                    if i == 0 and (_start != _raw_start or _end != _raw_end):
-                        print(f"    ⚠️ 蒙版位移超出画面范围，已钳制到 ±{MASK_KF_LIMIT}"
-                              f"（{_raw_start:+.2f}/{_raw_end:+.2f} → {_start:+.2f}/{_end:+.2f}"
-                              f" = {_start*half_h:+.0f}px/{_end*half_h:+.0f}px）")
-                    segment.add_keyframe(KP.mask_center_y, 0, _start)
-                    segment.add_keyframe(KP.mask_center_y, keyframe_time_1, _end)
-                    
+                    # 羽化动画（10帧内完成）：50% → 0%
+                    segment.add_keyframe(KP.mask_feather, 0, 0.5)
+                    segment.add_keyframe(KP.mask_feather, keyframe_time_1, 0.0)
+
                     frame_start_num = i * 11
                     frame_end_num = frame_start_num + 10
                     print(f"  ✓ 快闪{i+1}/5 {img_name} (帧{frame_start_num}-{frame_end_num}, 开始@{format_time(seg_start)})")
@@ -509,19 +494,11 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
     print(f"  · 快闪图片: 5张，关键帧间隔10帧，独立轨道叠加")
     print(f"  · 图1: 帧0-10，图2: 帧11-20，图3: 帧21-30，图4: 帧31-40，图5: 帧41-50")
     print(f"  · 关键帧: 每张图片相对自己开始时间的0-10帧")
-    print(f"  · 蒙版动画: 缩放150%→100% + 蒙版Y {MASK_KF_START_PX:+.0f}px→{MASK_KF_END_PX:+.0f}px")
+    print(f"  · 蒙版动画: 缩放150%→100% + 羽化50%→0%")
     print(f"  · 音效: 闪烁发光音效")
     print(f"  · 正片内容: 从 {format_time(total_opening_duration)} 开始，主轨道 VideoTrack")
     
     return total_opening_duration
-
-# 🔥 蒙版关键帧参数：第0帧 / 第10帧 的蒙版中心Y位置（单位：像素）
-#    正值在下、负值在上，形成自下而上扫过的揭示效果
-MASK_KF_START_PX = 100.0
-MASK_KF_END_PX = -400.0
-# 归一化上限：±1.0 = 素材上/下边缘。剪映手工拖动到画面外时约为 ±0.74，
-# 超过 ±1.0 蒙版就完全离开画面，动画"看不见"。
-MASK_KF_LIMIT = 1.0
 
 # 配置路径（可修改）
 # 🔥 跨平台：以脚本所在目录为基准，Windows/macOS/Linux 通用
@@ -768,7 +745,7 @@ for gi, group in enumerate(groups):
                             start_time=subtitle_start,
                             duration=seg_duration,
                             track_name="Subtitles",
-                            font=FontType.新青年体,
+                            font=FontType.优设标题黑,
                             style=draft.TextStyle(
                                 size=6.0,
                                 letter_spacing=1,
@@ -784,7 +761,7 @@ for gi, group in enumerate(groups):
                             start_time=subtitle_start,
                             duration=seg_duration,
                             track_name="Subtitles",
-                            font=FontType.新青年体,
+                            font=FontType.优设标题黑,
                             style=draft.TextStyle(size=5.0, letter_spacing=1),
                             border=draft.TextBorder(color=(0.0, 0.0, 0.0), alpha=1.0, width=40.0),
                             clip_settings=draft.ClipSettings(transform_y=-0.8),
@@ -900,7 +877,7 @@ project.add_text_simple(
     start_time=opening_duration,  # 从片头结束后开始
     duration=total_duration - opening_duration,
     track_name="DisclaimerTrack",
-    font=FontType.新青年体,
+    font=FontType.优设标题黑,
     style=draft.TextStyle(size=3.0, alpha=0.8, letter_spacing=1),
     clip_settings=draft.ClipSettings(transform_x=-0.8, transform_y=0.8)
 )
@@ -924,12 +901,12 @@ print(f"          · 快闪: ~1.67秒 (9张叠加，关键帧打在下一张开�
 print(f"          · 音效: 棘轮音效覆盖整个快闪")
 print(f"          · 蒙版: ✅ 线性蒙版 + 羽化动画（50%→0%）")
 print(f"  场景数: {len(success_segments)} 个")
-print(f"  配音:   {VOICE_SPEAKER} (语速1.1倍)")
+print(f"  配音:   {VOICE_SPEAKER} (语速1.05倍)")
 print(f"          · 统一轨道 VoiceOver（自动避让）")
 print(f"          · 跨场景合并配音：多个镜头合成{TTS_GROUP_CHARS}字一块，一次请求（语气连贯）")
 print(f"          · 字幕仍按标点切短句，按字数比例对齐配音时长")
 print(f"          · 淡入淡出防爆音")
-print(f"  字体:   新青年体 (字间距1)")
+print(f"  字体:   优设标题黑 (字间距1)")
 print(f"  字幕:   统一样式（size=5.0），精确同步TTS时长")
 print(f"          · 打字机入场动画：复古打字机（免费）")
 print(f"          · 半透明背景条：黑色 alpha=0.5（圆角0.35）")

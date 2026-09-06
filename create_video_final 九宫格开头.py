@@ -112,7 +112,7 @@ def format_time(microseconds):
     secs = seconds % 60
     return f"{minutes}:{secs:04.1f}"
 
-def generate_tts_with_retry(project, text, speaker, start_time, track_name, max_retries=3, speed=1.1):
+def generate_tts_with_retry(project, text, speaker, start_time, track_name, max_retries=3, speed=1.05):
     """
     生成TTS音频，失败时重试
     🔥 优化：启用 fallback、增加重试次数、音频规范化、语速调整
@@ -318,12 +318,12 @@ def add_grid_opening(project, image_dir, duration=2000000, first_scene_image=Non
         )
         
         if audio_seg:
-            # 🔥 设置语速1.1倍（此处在函数外，之前误用了未定义的变量 speed）
-            audio_seg.speed.speed = 1.1
+            # 🔥 设置语速1.05倍（此处在函数外，之前误用了未定义的变量 speed）
+            audio_seg.speed.speed = 1.05
             
             # 计算实际时长（原时长 / 语速）
             original_duration = audio_seg.target_timerange.duration
-            actual_duration = int(original_duration / 1.1)
+            actual_duration = int(original_duration / 1.05)
             
             # 更新目标时间范围
             from pyJianYingDraft.time_util import Timerange
@@ -336,7 +336,7 @@ def add_grid_opening(project, image_dir, duration=2000000, first_scene_image=Non
             if actual_duration != duration:
                 duration = actual_duration
             
-            print(f"  OK 片头配音已生成: {format_time(actual_duration)} (1.1倍速)")
+            print(f"  OK 片头配音已生成: {format_time(actual_duration)} (1.05倍速)")
     except Exception as e:
         print(f"  X 片头配音失败: {str(e)[:50]}")
     
@@ -347,7 +347,7 @@ def add_grid_opening(project, image_dir, duration=2000000, first_scene_image=Non
             start_time=0,
             duration=duration,
             track_name="OpeningTitle",
-            font=FontType.新青年体,
+            font=FontType.优设标题黑,
             style=draft.TextStyle(size=8.0, letter_spacing=1),  # 大字号 + 字间距1
             border=draft.TextBorder(color=(0.0, 0.0, 0.0), alpha=1.0, width=50.0),  # 粗描边
             clip_settings=draft.ClipSettings(transform_y=0.0)  # 居中位置
@@ -528,7 +528,7 @@ for seq, text, img_filename in mappings:
                     start_time=subtitle_start,
                     duration=subtitle_duration,
                     track_name="Subtitles",
-                    font=FontType.新青年体,
+                    font=FontType.优设标题黑,
                     style=draft.TextStyle(size=5.0, letter_spacing=1),
                     border=draft.TextBorder(color=(0.0, 0.0, 0.0), alpha=1.0, width=40.0),
                     clip_settings=draft.ClipSettings(transform_y=-0.8)
@@ -647,7 +647,7 @@ project.add_text_simple(
     start_time=opening_duration,  # 从片头结束后开始
     duration=total_duration - opening_duration,
     track_name="DisclaimerTrack",
-    font=FontType.新青年体,
+    font=FontType.优设标题黑,
     style=draft.TextStyle(size=3.0, alpha=0.8, letter_spacing=1),
     clip_settings=draft.ClipSettings(transform_x=-0.8, transform_y=0.8)
 )
@@ -667,8 +667,8 @@ print(f"总时长:   {format_time(total_duration)}")
 print(f"\n内容统计:")
 print(f"  片头:   5张图片占满屏幕（第5张为剧本第一张） + 居中标题 + 配音 + 九宫格入场")
 print(f"  场景数: {len(success_segments)} 个")
-print(f"  配音:   {VOICE_SPEAKER} (语速1.1倍)")
-print(f"  字体:   江湖体 (字间距1)")
+print(f"  配音:   {VOICE_SPEAKER} (语速1.05倍)")
+print(f"  字体:   优设标题黑 (字间距1)")
 print(f"  字幕:   已去除所有标点符号（包括中文引号）")
 print(f"  同步:   图片、字幕、音频完全一致（包含段间停顿）")
 print(f"  动画:   Ken Burns缩放（1.0 ↔ 1.1）")
