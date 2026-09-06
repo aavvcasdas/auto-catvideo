@@ -52,14 +52,27 @@ def looks_like_ours(name):
     return any(name.startswith(p) for p in OUR_OWN_PREFIXES)
 
 
-def inspect(draft_dir):
+def inspect(draft_dir, verbose=False):
+    name0 = os.path.basename(draft_dir)
+    if not os.path.isdir(draft_dir):
+        print(f"❌ 草稿目录不存在: {draft_dir}")
+        print("   （名字要和剪映草稿列表里显示的完全一致）")
+        return False
+
     j, f = load_draft(draft_dir)
     if not j:
-        print(f"  跳过（没有草稿文件）: {draft_dir}")
+        print(f"❌ {name0}: 目录里没有 draft_info.json / draft_content.json")
         return False
 
     masks = {m["id"]: m for m in j.get("materials", {}).get("masks", [])}
     if not masks:
+        if verbose:
+            print(f"❌ {name0}: 这个草稿里【没有任何蒙版素材】")
+            print("   说明蒙版没做上，或做完没保存。请确认：")
+            print("     1) 选中片段 → 右侧【画面】→【蒙版】→ 选一个形状（如线性）")
+            print("     2) 在蒙版的【位置】参数上点小钟表图标打关键帧")
+            print("     3) 移动播放头，拖动蒙版位置，自动生成第二个关键帧")
+            print("     4) Ctrl+S 保存，并【完全退出剪映】再运行本脚本")
         return False
 
     name = os.path.basename(draft_dir)
@@ -135,8 +148,10 @@ def main():
         print("❌ 草稿目录不存在，请先在剪映里建一个草稿")
         return
 
-    if len(sys.argv) > 1:
+    explicit = len(sys.argv) > 1
+    if explicit:
         targets = [os.path.join(root, sys.argv[1])]
+        print(f"指定草稿: {sys.argv[1]}\n")
     else:
         dirs = [os.path.join(root, d) for d in os.listdir(root)
                 if os.path.isdir(os.path.join(root, d))]
@@ -154,7 +169,7 @@ def main():
     found = False
     for d in targets:
         try:
-            if inspect(d):
+            if inspect(d, verbose=explicit):
                 found = True
                 print("\n" + "=" * 70)
                 print("👆 把上面这段发给我，我照着剪映的真实结构改代码")
