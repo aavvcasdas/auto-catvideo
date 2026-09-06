@@ -463,18 +463,31 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
                 try:
                     segment.add_mask(
                         MaskType.线性,
-                        center_y=MASK_KF_START_PX,   # 起始位置与第0帧关键帧一致
+                        center_y=MASK_KF_START_PX,   # 起始位置（下方 _start 会按上限钳制）
                         size=0.8,
                         feather=50.0,
                         invert=False
                     )
 
-                    # 🔥 蒙版位置Y关键帧：0帧=+100px，10帧=-400px（自上而下扫过）
-                    # add_mask 内部把像素换算成"占半个素材高"的归一化值，
-                    # 关键帧必须用同一套单位，否则位移量对不上。
+                    # 🔥 蒙版位置Y关键帧（语法已用剪映手工草稿验证：
+                    #    property_type=KFTypeMaskCenterY，挂在 common_keyframes，
+                    #    material_id 指向蒙版素材，值为"占半个素材高"的归一化值）
+                    #
+                    # ⚠️ 归一化值超出 ±1.0 就意味着蒙版中心跑到素材之外，
+                    #    线性蒙版整条分界线离开画面，剩下的时间画面恒亮/恒暗，
+                    #    看起来就是"没有动画"。剪映手工拖动的极限约 ±0.74。
+                    #    所以这里做钳制，避免设了个看不见的值还以为没生效。
                     half_h = segment.material_size[1] / 2
-                    segment.add_keyframe(KP.mask_center_y, 0, MASK_KF_START_PX / half_h)
-                    segment.add_keyframe(KP.mask_center_y, keyframe_time_1, MASK_KF_END_PX / half_h)
+                    _raw_start = MASK_KF_START_PX / half_h
+                    _raw_end = MASK_KF_END_PX / half_h
+                    _start = max(-MASK_KF_LIMIT, min(MASK_KF_LIMIT, _raw_start))
+                    _end = max(-MASK_KF_LIMIT, min(MASK_KF_LIMIT, _raw_end))
+                    if i == 0 and (_start != _raw_start or _end != _raw_end):
+                        print(f"    ⚠️ 蒙版位移超出画面范围，已钳制到 ±{MASK_KF_LIMIT}"
+                              f"（{_raw_start:+.2f}/{_raw_end:+.2f} → {_start:+.2f}/{_end:+.2f}"
+                              f" = {_start*half_h:+.0f}px/{_end*half_h:+.0f}px）")
+                    segment.add_keyframe(KP.mask_center_y, 0, _start)
+                    segment.add_keyframe(KP.mask_center_y, keyframe_time_1, _end)
                     
                     frame_start_num = i * 11
                     frame_end_num = frame_start_num + 10
@@ -506,6 +519,9 @@ def add_advanced_opening(project, image_dir, mappings, duration_lead=1800000, du
 #    正值在下、负值在上，形成自下而上扫过的揭示效果
 MASK_KF_START_PX = 100.0
 MASK_KF_END_PX = -400.0
+# 归一化上限：±1.0 = 素材上/下边缘。剪映手工拖动到画面外时约为 ±0.74，
+# 超过 ±1.0 蒙版就完全离开画面，动画"看不见"。
+MASK_KF_LIMIT = 1.0
 
 # 配置路径（可修改）
 # 🔥 跨平台：以脚本所在目录为基准，Windows/macOS/Linux 通用
