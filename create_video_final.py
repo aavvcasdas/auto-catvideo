@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 通用视频生成脚本 - 从口播文案对照表生成视频
@@ -240,9 +240,70 @@ def generate_tts_with_retry(project, text, speaker, start_time, track_name, max_
     
     return None, 0
 
-# 已删除 split_text_recursively 函数
-# TTS引擎可以处理长文本，不需要人为分割
-# 分割会导致语音断断续续（灌灌的）
+# ============================================================
+# 🔥 TTS 长文本处理
+# ------------------------------------------------------------
+# 剪映内置的配音服务走 SAMI（wss://sami.bytedance.com .../ws，namespace=TTS）。
+# 按火山引擎 SAMI 官方文档（错误码 40402003 TTSExceededTextLimit）：
+#   · 流式(WebSocket)接口   上限 2000 个 UTF-8 字符
+#   · 非流式(HTTP)接口      上限 1000 个 UTF-8 字符
+# 本项目用的正是流式 WebSocket，所以「25 字」并不是接口限制，
+# 单次请求几百个汉字完全没问题。之前按 25/50 字硬切，
+# 才导致每小段都被当成独立句子重新起调、句尾拖长，听起来一顿一顿。
+#
+# 结论：只在超过下面这个安全阈值时才切，且优先在句末标点处切。
+# ============================================================
+TTS_MAX_CHARS = 300          # 单次请求最大字符数（远低于 2000 上限，留足余量）
+TTS_HARD_LIMIT = 600         # 绝对上限，超过必须切
+
+
+def split_text_for_tts(text, max_chars=TTS_MAX_CHARS):
+    """
+    将长文案切成尽量少的 TTS 请求块。
+
+    策略：
+      1. 全文不超过 max_chars → 原样返回（一次合成，语气最连贯）
+      2. 超长 → 优先在句末标点（。！？；…）处断开，尽量把多句合并塞满一块
+      3. 单句仍然超长 → 退而求其次在逗号/顿号处断
+      4. 还超长 → 按 max_chars 硬切
+    """
+    text = re.sub(r'\s+', '', text or '')
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+
+    # 1) 先按句末标点切成"句子"（保留标点）
+    raw = re.split(r'(?<=[。！？；…])', text)
+    units = [u for u in raw if u]
+
+    # 2) 句子本身太长的，再按次级标点细分
+    refined = []
+    for u in units:
+        if len(u) <= max_chars:
+            refined.append(u)
+            continue
+        sub = [s for s in re.split(r'(?<=[，、,：:])', u) if s]
+        for s in sub:
+            while len(s) > max_chars:
+                refined.append(s[:max_chars])
+                s = s[max_chars:]
+            if s:
+                refined.append(s)
+
+    # 3) 贪心合并，尽量凑满 max_chars（块数越少语气越连贯）
+    chunks = []
+    buf = ''
+    for u in refined:
+        if buf and len(buf) + len(u) > max_chars:
+            chunks.append(buf)
+            buf = u
+        else:
+            buf += u
+    if buf:
+        chunks.append(buf)
+
+    return [c for c in chunks if c.strip()]
 
 def get_random_images(image_dir, count=5):
     """随机选择指定数量的图片"""
@@ -539,77 +600,85 @@ for seq, text, img_filename in mappings:
         if not combined_sentences:
             combined_sentences = [text]
         
-        if len(clean_text) <= 50:
-            # ≤50字：整段生成一个TTS，字幕按字数比例分配时间
+        # 🔥 长文本处理：SAMI 流式接口上限 2000 字符，无需按 25/50 字硬切。
+        #    整段（或尽量少的几大块）一次合成，语气才连贯。
+        tts_chunks = split_text_for_tts(text, TTS_MAX_CHARS)
+        if not tts_chunks:
+            print(f"  场景 {seq:02d}: 跳过（无有效文字）")
+            continue
+
+        if len(tts_chunks) == 1:
             print(f"  场景 {seq:02d}: 整段TTS+{len(combined_sentences)}句字幕 ({len(clean_text)}字) - {text[:40]}...")
-            
-            # 生成一个完整的TTS
-            text_for_tts = text.replace(' ', '')
-            text_for_tts = re.sub(r'。{2,}', '。', text_for_tts)
-            if not text_for_tts.endswith(('。', '！', '？')):
-                text_for_tts += '。'
-            
-            audio_seg, total_scene_duration = generate_tts_with_retry(
-                project, text_for_tts, VOICE_SPEAKER, current_time, "VoiceOver"
-            )
-            
-            if not audio_seg:
-                failed_segments.append((seq, text[:30], "配音失败"))
-                print(f"  X 场景 {seq:02d}: 配音失败")
-                continue
-            
-            print(f"    ✓ 完整TTS: {format_time(total_scene_duration)} (语气连贯)")
-            
-            # 计算每句字数，按比例分配字幕时间
-            sentence_chars = []
-            for sentence in combined_sentences:
-                clean_sentence = re.sub(r'[，。！？、""''：；…——/\s]', '', sentence)
-                sentence_chars.append(len(clean_sentence))
-            
-            total_chars = sum(sentence_chars)
-            if total_chars == 0:
-                failed_segments.append((seq, text[:30], "无有效文字"))
-                continue
-            
-            # 按比例分配字幕时长
-            sentence_durations = []
-            for sent_idx, sentence in enumerate(combined_sentences):
-                char_count = sentence_chars[sent_idx]
-                subtitle_duration = int(total_scene_duration * (char_count / total_chars))
-                sentence_durations.append((sentence, subtitle_duration))
-            
         else:
-            # >50字：按标点分段生成多个TTS
-            print(f"  场景 {seq:02d}: 分段TTS {len(combined_sentences)}句 ({len(clean_text)}字) - {text[:40]}...")
-            
-            sentence_durations = []
-            tts_start_time = current_time
-            
-            for sent_idx, sentence in enumerate(combined_sentences):
-                text_clean = sentence.replace(' ', '')
-                text_clean = re.sub(r'。{2,}', '。', text_clean)
-                
-                if not text_clean.endswith(('。', '！', '？', '，', '、', '/')):
-                    text_clean += '。'
-                
-                audio_seg, seg_duration = generate_tts_with_retry(
-                    project, text_clean, VOICE_SPEAKER, tts_start_time, "VoiceOver"
-                )
-                
-                if audio_seg:
-                    sentence_durations.append((sentence, seg_duration))
-                    tts_start_time += seg_duration
+            print(f"  场景 {seq:02d}: 长文案分{len(tts_chunks)}块TTS+{len(combined_sentences)}句字幕 ({len(clean_text)}字) - {text[:40]}...")
+
+        def _clean_for_tts(t):
+            t = t.replace(' ', '')
+            t = re.sub(r'。{2,}', '。', t)
+            if not t.endswith(('。', '！', '？', '…')):
+                t += '。'
+            return t
+
+        # 逐块生成配音，记录每块的真实时长
+        chunk_results = []      # [(chunk_text, duration)]
+        tts_start_time = current_time
+        for chunk_idx, chunk in enumerate(tts_chunks):
+            audio_seg, seg_duration = generate_tts_with_retry(
+                project, _clean_for_tts(chunk), VOICE_SPEAKER, tts_start_time, "VoiceOver"
+            )
+            if audio_seg:
+                chunk_results.append((chunk, seg_duration))
+                tts_start_time += seg_duration
+            else:
+                print(f"      X 第{chunk_idx+1}块失败: {chunk[:20]}")
+
+        if not chunk_results:
+            failed_segments.append((seq, text[:30], "配音失败"))
+            print(f"  X 场景 {seq:02d}: 配音失败")
+            continue
+
+        total_scene_duration = tts_start_time - current_time
+        if len(chunk_results) == 1:
+            print(f"    ✓ 完整TTS: {format_time(total_scene_duration)} (一次合成，语气连贯)")
+        else:
+            print(f"    ✓ 分块TTS: {format_time(total_scene_duration)} ({len(chunk_results)}块)")
+
+        # 字幕对齐：把每块配音的真实时长，按字数比例分给该块内的字幕句
+        def _strip_punct(t):
+            return re.sub(r'[，。！？、"" \u2018\u2019：；…——/\s]', '', t)
+
+        sentence_durations = []
+        cursor = 0                       # 在 combined_sentences 中的游标
+        for chunk, chunk_duration in chunk_results:
+            chunk_plain = _strip_punct(chunk)
+            # 收集属于这一块的字幕句（按累计字数匹配）
+            picked, acc = [], 0
+            while cursor < len(combined_sentences) and acc < len(chunk_plain):
+                s_plain = _strip_punct(combined_sentences[cursor])
+                picked.append((combined_sentences[cursor], len(s_plain)))
+                acc += len(s_plain)
+                cursor += 1
+            if not picked:
+                picked = [(chunk, max(1, len(chunk_plain)))]
+
+            total_chars = sum(c for _, c in picked) or 1
+            used = 0
+            for i_p, (sentence, char_count) in enumerate(picked):
+                if i_p == len(picked) - 1:
+                    d = chunk_duration - used      # 最后一句吃掉取整误差
                 else:
-                    print(f"      X 分句 {sent_idx+1} 失败: {text_clean[:20]}")
-            
-            if not sentence_durations:
-                failed_segments.append((seq, text[:30], "配音失败"))
-                print(f"  X 场景 {seq:02d}: 配音失败")
-                continue
-            
-            total_scene_duration = tts_start_time - current_time
-            print(f"    ✓ 分段TTS: {format_time(total_scene_duration)} ({len(sentence_durations)}段)")
-        
+                    d = int(chunk_duration * (char_count / total_chars))
+                    used += d
+                sentence_durations.append((sentence, d))
+
+        # 兜底：还有没分配到的字幕句
+        if cursor < len(combined_sentences):
+            for sentence in combined_sentences[cursor:]:
+                sentence_durations.append((sentence, 0))
+        sentence_durations = [(s, d) for s, d in sentence_durations if d > 0]
+        if not sentence_durations:
+            sentence_durations = [(text, total_scene_duration)]
+
         # 2. 🔥 字幕生成：使用分配好的时长
         
         # 5. 🔥 修复：统一字幕样式，删除数字高亮（保留动画和背景条）
@@ -798,7 +867,7 @@ print(f"          · 蒙版: ✅ 线性蒙版 + 羽化动画（50%→0%）")
 print(f"  场景数: {len(success_segments)} 个")
 print(f"  配音:   {VOICE_SPEAKER} (语速1.1倍)")
 print(f"          · 统一轨道 VoiceOver（自动避让）")
-print(f"          · 只在超过25字时分割，≤25字保持完整连贯")
+print(f"          · 整段一次合成（SAMI流式上限2000字符），超{TTS_MAX_CHARS}字才在句末标点处分块")
 print(f"          · 淡入淡出防爆音")
 print(f"  字体:   新青年体 (字间距1)")
 print(f"  字幕:   统一样式（size=5.0），精确同步TTS时长")

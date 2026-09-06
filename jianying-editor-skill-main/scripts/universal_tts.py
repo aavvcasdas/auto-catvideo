@@ -82,7 +82,19 @@ def _build_ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+# SAMI TTS 文本长度上限（火山引擎官方文档，错误码 40402003 TTSExceededTextLimit）：
+#   流式 WebSocket 接口：2000 个 UTF-8 字符
+#   非流式 HTTP 接口：  1000 个 UTF-8 字符
+# 本文件用的是流式 WebSocket，因此单次请求可以传几百个汉字，
+# 不需要把文案切成 25 字的小段（那样会让配音听起来一顿一顿）。
+SAMI_WS_TEXT_LIMIT = 2000
+
+
 async def _run_sami_tts(text: str, speaker: str, output_file: str, dev_id: str, iid: str):
+    if len(text) > SAMI_WS_TEXT_LIMIT:
+        return False, (
+            f"Text too long for SAMI streaming TTS: {len(text)} > {SAMI_WS_TEXT_LIMIT} chars"
+        )
     ws_url = f"wss://sami.bytedance.com/internal/api/v2/ws?device_id={dev_id}&iid={iid}"
     headers = {
         "User-Agent": f"JianyingPro/5.9.0.11632 (Windows 10.0.19045; app_id:3704; device_id:{dev_id})"
