@@ -1,0 +1,38 @@
+# ============================================================
+# 人生副本视频流水线 —— 依赖
+# ------------------------------------------------------------
+# 实测最小可运行集：只装下面两个就能跑通
+#   python -m pipeline.cli build --backend estimate
+# （在只装了 pymediainfo + websockets 的干净 venv 里验证过）
+#
+# 安装：  pip install -r requirements.txt
+# ============================================================
+
+# pyJianYingDraft 读音频/视频时长要用（vendored 在
+# jianying-editor-skill-main/scripts/vendor/pyJianYingDraft/local_materials.py）
+pymediainfo>=6.0
+
+# 剪映内置配音（SAMI 流式 WebSocket 接口）
+websockets>=12.0
+
+# ------------------------------------------------------------
+# 可选：按需再装
+# ------------------------------------------------------------
+# 剪映云曲库 / 云端素材下载（config.yaml 里 bgm.enabled: true 时需要）
+requests>=2.31
+
+# tts.backend: edge 时的兜底配音
+# edge-tts>=7.0
+
+# jianying-editor-skill-main 的其它脚本（录屏、智能变焦、批量导出）才需要；
+# 本流水线生成草稿用不到。注意 uiautomation 只支持 Windows。
+# opencv-python>=4.11
+# numpy>=2.2
+# imageio>=2.37
+# psutil>=7.0
+# uiautomation>=2.0.20   # Windows only
+
+# ------------------------------------------------------------
+# 开发 / 测试
+# ------------------------------------------------------------
+# pytest>=8.0

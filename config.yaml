@@ -1,0 +1,82 @@
+# ============================================================
+# 人生副本视频流水线配置
+# ------------------------------------------------------------
+# 命令行可覆盖：python -m pipeline.cli build --style grid --speaker xxx
+# 片头预设：mask_flash | mask_flash_fixed | flash9 | grid
+#   （对应原来 4 个 create_video_final*.py 脚本）
+# 注意：本文件是 YAML 子集（两层缩进、标量、字符串列表、# 注释），
+#       由 pipeline/config.py 解析，不需要安装 pyyaml。
+# ============================================================
+
+project:
+  name_prefix: 人生副本
+  # drafts_root: D:/JianyingPro Drafts   # 不填=自动探测；也可用环境变量 JY_PROJECTS_ROOT
+  width: 1920
+  height: 1080
+
+input:
+  # mapping_file: 剧本/口播文案_图片序号_对应表.txt   # 相对路径请写绝对路径或用 --mapping
+  # image_dir: image
+
+tts:
+  backend: sami                 # sami（剪映内置）| edge | estimate（离线估算，调试用）
+  speaker: ICL_zh_male_momodianying
+  speed: 1.05
+  retries: 3
+  cache: true
+  group_chars: 180              # 配音块字数：越大语气越连贯，越小字幕对齐越准
+  group_gap_us: 0               # 块间停顿（微秒）
+  audio_effect: null            # 例：人声增强（旧脚本写的 audio_loudness_normalization 不存在）
+  fade_in_us: 0
+  fade_out_us: 0
+
+opening:
+  style: mask_flash
+  lead_text: 今天你要体验的人生副本是外号的保质期只有一届学生
+  measure_lead_tts: true        # 先合成引导语配音，用真实时长当片头时长
+  flash_count: 5
+  sfx: ratchet.wav
+  sfx_fallback: coding.WAV
+  random_seed: null             # 填数字可让快闪选图可复现
+
+subtitle:
+  font: 优设标题黑
+  size: 5.0
+  first_centered: true
+  background: true
+  max_chars_per_line: 22        # 单句字幕净字数上限，超了再切一刀
+
+body:
+  ken_burns: true
+  # first_shot_effects:
+  #   - 幻彩故障
+  #   - 震动屏闪
+
+disclaimer:
+  enabled: true
+  text: 虚构创作，与真实人物无关
+
+bgm:
+  enabled: false
+  source: cloud
+  query: 沉重 钢琴
+  volume: 0.15
+
+run:
+  interactive: true             # 缺图时询问 y/N；批量/CI 用 --yes 关掉
+  skip_missing_images: true
+  srt: true                     # 导出 .srt，方便核对字幕时间轴
+  report: true
+
+check:
+  min_shot_chars: 8
+  max_shot_chars: 80
+  chars_per_second: 4.4
+  # target_duration_s: [90, 240]
+  # banned_words:
+  #   - 敏感词1
+
+shotlist:
+  target_chars: 40
+  lead_lines: 3
+  prompt_style: 电影感写实风格，冷色调，硬光，浅景深，35mm 胶片质感，第二人称视角
