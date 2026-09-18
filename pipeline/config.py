@@ -139,10 +139,32 @@ DEFAULT_CONFIG = {
         "report_dir": os.path.join(REPO_ROOT, "output"),
         "srt": True,              # 同时导出 .srt，便于核对字幕时间轴
     },
+    # Arena agent 交接（替代 MoneyPrinterPlus 的 llm.provider + api_key）
+    "agent": {
+        "provider": "arena-agent",
+        "root": None,              # None = <repo>/.agent
+        "story_chars": [1200, 2500],   # demo 库《剧本人生》的短片硬指标
+        "min_shots": 40,
+        "max_shots": 90,
+    },
+    # 发布元数据（不自动发布，只出清单；对应 MoneyPrinterPlus 的 publisher 段）
+    "publish": {
+        "enabled": True,
+        "title_prefix": "",
+        "collection": "人生副本",
+        "hashtags": ["人生副本", "剧本人生", "第二人称"],
+        "kuaishou_domain": "",     # 例如 "教育/语言教育"
+        "platforms": ["douyin", "kuaishou", "xiaohongshu", "shipinhao"],
+    },
     "check": {
         "min_shot_chars": 8,
         "max_shot_chars": 80,
-        "target_duration_s": [90, 240],   # demo 库规范：单条 1.5–3 分钟
+        # 预估时长区间（秒）。
+        # 注意：demo 库 README 写的是「单条 1200–2500 字 ≈ 1.5–3 分钟」，
+        # 但这两个数对不上——中文口播 4.4 字/秒时，1200–2500 字是 273–568 秒
+        # （4.5–9.5 分钟）；要真做到 1.5–3 分钟只能写 400–800 字。
+        # 这里以「字数」为准（那才是可数的硬指标），时长区间按 4.4 字/秒推出来。
+        "target_duration_s": [240, 600],
         "chars_per_second": 4.4,
         "max_repeat_image": 3,
         "banned_words": [],       # 平台敏感词，命中即 FAIL
@@ -240,6 +262,27 @@ def _coerce_scalar(raw):
     return text
 
 
+def _strip_value(rest, lineno):
+    """剥掉行尾注释，同时正确处理带引号的值。
+
+    之前只在「不以引号开头」时才剥注释，于是
+        kuaishou_domain: ""          # 例：教育/语言教育
+    会把整行（含注释）当成值。
+    """
+    if not rest:
+        return rest
+    if rest[0] in "\"'":
+        quote = rest[0]
+        end = rest.find(quote, 1)
+        if end == -1:
+            raise ValueError(f"config 第 {lineno} 行引号没闭合: {rest!r}")
+        tail = rest[end + 1:].strip()
+        if tail and not tail.startswith("#"):
+            raise ValueError(f"config 第 {lineno} 行引号后有多余内容: {tail!r}")
+        return rest[: end + 1]
+    return re.split(r"\s+#", rest, maxsplit=1)[0].strip()
+
+
 def _tokenize_yaml(text):
     """把 YAML 子集切成 [(indent, kind, key, raw_value, lineno)]。"""
     tokens = []
@@ -261,10 +304,7 @@ def _tokenize_yaml(text):
         if ":" not in stripped:
             raise ValueError(f"config 第 {lineno} 行缺少冒号: {stripped!r}")
         key, _, rest = stripped.partition(":")
-        rest = rest.strip()
-        # 去掉行尾注释（只在不带引号时处理，避免吃掉 "a # b"）
-        if rest and rest[0] not in "\"'":
-            rest = re.split(r"\s+#", rest, maxsplit=1)[0].strip()
+        rest = _strip_value(rest.strip(), lineno)
         tokens.append((indent, "key", key.strip(), rest, lineno))
     return tokens
 

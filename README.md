@@ -49,8 +49,16 @@ python -m pipeline.cli build \
     --batch "剧本/对照表_*.txt" \          # 批量：一表一片
     --yes                                 # 非交互（CI / 批量）
 
+python -m pipeline.cli build --variants 5 --seed v1     # 混剪：一次出 5 条不重复
 python -m pipeline.cli check                            # 素材预检
 python -m pipeline.cli shotlist --raw 作品/55_.../正文.md  # 原稿 → 对照表
+
+# 用 Arena agent 顶替 LLM API（不需要任何 api_key）
+python -m pipeline.cli agent-task --topic 外卖员的一生   # 出题 → .agent/pending/
+#   … 让 agent 读题、把结果写进 .agent/done/<id>.json …
+python -m pipeline.cli agent-apply --id <id>            # 收卷 → 对照表 + 出图提示词
+python -m pipeline.cli agent-list                       # 看待办/已答
+
 python -m pipeline.cli presets                          # 列出片头预设
 ```
 
@@ -69,10 +77,12 @@ pipeline/
   tts.py        配音引擎：重试 / 语速换算 / 磁盘缓存 / estimate 离线模式
   openings.py   4 种片头风格
   body.py       正片：字幕、图片、Ken Burns、首镜特效、叠甲、BGM
-  pipeline.py   编排 + SRT / JSON 报告导出
+  pipeline.py   编排 + SRT / JSON 报告 / 发布清单导出
+  agentio.py    Arena agent 交接协议（出题/收卷/校验），替代 LLM API
   cli.py        命令行入口
+.agent/         agent 任务文件（pending 待办 / done 已答），不进版本库
 config.yaml     唯一需要改的文件
-tests/          35 个单元测试（不联网，estimate 模式跑完整流水线）
+tests/          53 个单元测试（不联网，estimate 模式跑完整流水线）
 剧本/           口播文案对照表
 image/          分镜图（shot_01.jpg …）
 audio/          片头音效
@@ -135,6 +145,83 @@ source 2_500_000us, speed 1.05  →  target 2_380_952us  ✓ 与 source/speed �
 
 ---
 
+## 从 MoneyPrinterPlus 借了什么
+
+我实际读了它的 `config/config.example.yml`、`services/llm/llm_service.py`、
+`services/hunjian/hunjian_service.py`、`services/video/video_service.py`。
+它的大部分体积在**多 provider 适配 + Selenium 自动发布**，这两块对你没用
+（你不打算调 API；自动发布要在你本机跑真实浏览器）。真正值钱的是三件事，都搬过来了：
+
+### 1. LLM 提示词 → 改成 agent 交接（`pipeline/agentio.py`）
+
+它的 `services/llm/llm_service.py` 里有三个提示词模板：
+
+```python
+self.topic_template   = "请为以下主题扩展为详细的一篇文章,内容在{length}字以内…"
+self.keyword_template = "Please analyze the following content in english, and then extract 1-5 short English keywords…"
+self.sd_template      = "任务：将以下句子转换成Stable Diffusion图像生成模型能够理解的prompt…"
+```
+
+然后 `MyLLMService.generate_content()` 走 HTTP，11 个 `services/llm/*_service.py`
+各要一个 api_key。**你要的不是这个**——你要的是那三段提示词。
+
+所以这里把提示词落成文件，交给 Arena agent 填：
+
+```bash
+python -m pipeline.cli agent-task --topic 外卖员的一生
+# → .agent/pending/<id>.json   含提示词 + 硬指标 + 输出格式要求
+#   agent 读它，把结果写进 .agent/done/<id>.json
+python -m pipeline.cli agent-apply --id <id>
+# → 剧本/对照表_<标题>.txt + 剧本/出图提示词_<标题>.txt
+```
+
+提示词按《人生副本》规格改写过：第二人称、数字成链、爽点必须走可验证的公示通道、
+合规红线，硬指标直接引 demo 库的「1200–2500 字 / 40–90 镜 / 单镜 12–60 字」。
+
+**收卷时强制校验**（`agentio.validate_answer`），不合格直接退回，不会污染流水线：
+镜数越界、单镜字数越界、总字数越界、**没有标点（切不出字幕）**、缺引导语。
+实测：我第一版答案 1063 字被拦（要求 ≥1200），补到 1226 字才过。
+
+好处：提示词进版本库可 diff 可回滚；产出是可复查的文本；断网能跑；
+换 agent / 换模型不用改一行代码。
+
+### 2. 混剪候选池 → 一次出 N 条不重复（`script_io.py`）
+
+它的 `services/hunjian/hunjian_service.py` 靠 `random_line_from_text_file()`
+每个场景随机抽一行，用组合数产出「100 条不重复」。
+
+对照表现在支持候选池，用 `//` 分隔（不能用 `|`，那是字段分隔符；也不能用 `/`，
+文案里有 `1/217`）：
+
+```
+01 | shot_01.jpg//shot_02.jpg//shot_03.jpg | 军训那天，你顺拐了四十七次。//九月三十八度，你一个人走了三百步。
+02 | shot_04.jpg | 只有一条候选也完全没问题
+```
+
+```bash
+python -m pipeline.cli build --variants 5 --seed v1    # 5 条不重复，草稿名自动带 _v00…_v04
+```
+
+没用纯随机，而是 `md5(seed:variant:镜头号)` 取模：**可复现**（同 seed 同 variant
+永远同一组合），且每镜独立采样，所以 88 镜 × 2 候选能铺满 2^88 空间——
+不像「按序号轮转」那样 2 候选只有 2 种结果。组合空间不够时如实报告，不假装凑数。
+没有候选池的老对照表行为完全不变（组合数 = 1）。
+
+### 3. 发布元数据 → 只出清单，不做自动发布（`_export_publish_manifest`）
+
+它的 `publisher` 段有 `title_prefix` / `collection`，快手还有 `domain.level1/level2`，
+由 Selenium 驱动真实浏览器上传。浏览器自动化搬不过来，但**元数据 schema 值得留**：
+出片时顺手生成 `output/发布清单_<片名>.md`，含标题、话题标签、各平台要点、
+引导语（可当简介首句）、自查清单。手动上传照抄即可。
+
+### 没搬的
+
+- **ffmpeg 混流那套**（`video_service.py` 的 `add_background_music` 用
+  `amix` + `aloop`）——你出的是剪映草稿，BGM 在剪映里加更好，不重复造。
+- **多 TTS provider 适配**（Azure/阿里/腾讯/chatTTS/GPTSoVITS）——剪映内置
+  SAMI 免费且音色贴合，加了反而要管一堆 key。
+- **Selenium 自动发布**——见上。
+
 ## 对接 `aavvcasdas/demo` 剧本库
 
 demo 库（《剧本人生》拆书库）产出的是 `作品/NN_xxx/正文.md`——
@@ -178,10 +265,12 @@ demo 库的短片规范是「单条 1200–2500 字 ≈ 1.5–3 分钟」。当�
 python -m unittest discover -s tests -v      # 或 pytest tests/ -q
 ```
 
-35 个用例，**不联网**（配音走 estimate 模式，素材用临时生成的 wav）：
+53 个用例，**不联网**（配音走 estimate 模式，素材用临时生成的 wav）：
 文案切分与时长分配、对照表解析与预检、原稿转对照表与断句、
 语速换算自洽性、4 种片头预设、缺图跳过不中断、
-以及端到端跑完整流水线后**校验时间轴首尾相接、配音轨正好铺到成片结尾**。
+端到端跑完整流水线后**校验时间轴首尾相接、配音轨正好铺到成片结尾**；
+新增：混剪候选池的可复现性与变体互不重复、agent 出题/校验/收卷往返、
+发布清单内容、YAML 带引号值 + 行尾注释的解析回归。
 
 ---
 
@@ -191,8 +280,9 @@ python -m unittest discover -s tests -v      # 或 pytest tests/ -q
    剪映有「识别字幕」能给出词级时间戳，接上就能精确对齐——但 SAMI 接口
    是否返回 `tts_subtitle` 我在沙箱里验证不了（`sami.bytedance.com` 连接被重置），
    需要在能访问该域名的机器上抓一次响应确认。
-2. **自动发布**。MoneyPrinterPlus 那套 Selenium 发布（抖音/快手/小红书/视频号）
-   没搬过来——它依赖真实浏览器和已登录会话，得在你本机上跑。
+2. **自动发布**。MoneyPrinterPlus 那套 Selenium 发布依赖真实浏览器和已登录会话，
+   只能在沙箱外跑。现在只做到「生成发布清单」这一步。真要自动化，
+   建议在 `pipeline/` 下加 `publisher.py`，读同一份 `publish:` 配置。
 3. **AI 生图接线**。`shotlist` 已经产出每镜提示词，但没接 SD/comfyUI 后端；
    要接的话建议在 `pipeline/` 下加一个 `imagegen.py`，按 `image/shot_NN.jpg` 落盘即可。
 4. **Web UI**。现在是 CLI + YAML；要 Streamlit 界面的话，`pipeline.build(cfg=...)`

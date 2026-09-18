@@ -6,6 +6,9 @@ output/run_report_*.json
 output/*.srt
 .cache/
 
+# agent 交接工作目录（产出物已落到 剧本/，这里只是中间态）
+.agent/
+
 # 本地环境
 .venv/
 venv/

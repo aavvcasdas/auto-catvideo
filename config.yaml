@@ -68,11 +68,31 @@ run:
   srt: true                     # 导出 .srt，方便核对字幕时间轴
   report: true
 
+# Arena agent 交接：不调 LLM API，由 agent 填 .agent/pending 里的任务
+agent:
+  provider: arena-agent
+  # story_chars: [1200, 2500]
+  # min_shots: 40
+  # max_shots: 90
+
+# 发布元数据（只生成清单，手动上传时照抄；不做 Selenium 自动发布）
+publish:
+  enabled: true
+  collection: 人生副本
+  kuaishou_domain: ""          # 例：教育/语言教育
+  # hashtags:
+  #   - 人生副本
+  #   - 剧本人生
+  # title_prefix: "【人生副本】"
+
 check:
   min_shot_chars: 8
   max_shot_chars: 80
   chars_per_second: 4.4
-  # target_duration_s: [90, 240]
+  # 预估时长区间（秒）。默认 [240, 600] 是按 4.4 字/秒从「1200–2500 字」推出来的。
+  # demo 库 README 说「1200–2500 字 ≈ 1.5–3 分钟」，这两个数其实对不上：
+  # 4.4 字/秒下 1200 字就是 4.5 分钟。要真做到 1.5–3 分钟，得把文案压到 400–800 字。
+  # target_duration_s: [240, 600]
   # banned_words:
   #   - 敏感词1
 

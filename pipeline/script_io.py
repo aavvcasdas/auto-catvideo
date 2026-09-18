@@ -8,6 +8,7 @@
 """
 
 import collections
+import hashlib
 import os
 import re
 
@@ -19,8 +20,24 @@ _PATTERN_PLAIN = r"^\s*(\d+)[\s.．、]+(.+)$"
 
 _SKIP_HINTS = ("此后镜头无配套字幕", "无配套字幕")
 
+# 混剪候选池分隔符。
+# 为什么不是 "|"：对照表本身就用 | 分字段（01 | shot_01.jpg | 文案）。
+# 为什么不是 "/"：文案里会出现 "1/217" 这种，且 "/" 是字幕切分符。
+CANDIDATE_SEP = "//"
 
-def parse_mapping_file(file_path):
+
+def split_candidates(field):
+    """把 `A//B//C` 拆成候选池；没有分隔符就返回单元素列表。"""
+    parts = [p.strip() for p in (field or "").split(CANDIDATE_SEP)]
+    parts = [p for p in parts if p]
+    return parts or [(field or "").strip()]
+
+
+def has_candidates(field):
+    return CANDIDATE_SEP in (field or "")
+
+
+def parse_mapping_file(file_path, variant=None, seed=None):
     """解析口播文案对照表。
 
     支持格式：
@@ -28,13 +45,34 @@ def parse_mapping_file(file_path):
         02. 文案内容
         01 | shot_01.jpg | 文案内容
         分镜01 | shot_01.jpg | 文案内容
+        01 | shot_01.jpg//shot_09.jpg | 文案A//文案B     ← 混剪候选池
+
+    Args:
+        variant: 变体序号。None = 每镜都取候选池第 1 个（与旧行为一致）；
+                 整数 = 按 sample_variant() 的规则挑，用于批量混剪。
+        seed:    变体采样的随机种子（配合 variant 使用）。
 
     Returns: [(序号, 文案, 图片文件名), ...]
     """
+    entries = parse_mapping_entries(file_path)
+    if variant is None:
+        return [(e["seq"], e["candidates_text"][0], e["candidates_image"][0]) for e in entries]
+    return [
+        (e["seq"], text, image)
+        for e, text, image in zip(
+            entries,
+            sample_picks([e["candidates_text"] for e in entries], variant, seed),
+            sample_picks([e["candidates_image"] for e in entries], variant, seed),
+        )
+    ]
+
+
+def parse_mapping_entries(file_path):
+    """解析成带候选池的完整条目。字段：seq / candidates_text / candidates_image。"""
     with open(file_path, "r", encoding="utf-8") as handle:
         content = handle.read()
 
-    mappings = []
+    entries = []
     for line in content.split("\n"):
         line = line.strip()
         if not line or line.startswith("#") or line.startswith("---"):
@@ -45,22 +83,111 @@ def parse_mapping_file(file_path):
         match = re.match(_PATTERN_BAR, line)
         if match:
             seq = int(match.group(1))
-            image = match.group(2).strip()
-            caption = match.group(3).strip()
-            if any(hint in caption for hint in _SKIP_HINTS):
+            raw_image = match.group(2).strip()
+            raw_caption = match.group(3).strip()
+            if any(hint in raw_caption for hint in _SKIP_HINTS):
                 continue
-            mappings.append((seq, caption, image))
+            entries.append(
+                {
+                    "seq": seq,
+                    "candidates_image": split_candidates(raw_image),
+                    "candidates_text": split_candidates(raw_caption),
+                }
+            )
             continue
 
         match = re.match(_PATTERN_PLAIN, line)
         if match:
             seq = int(match.group(1))
-            caption = match.group(2).strip()
-            if not caption or len(caption) < 3:
+            raw_caption = match.group(2).strip()
+            if not raw_caption or len(raw_caption) < 3:
                 continue
-            mappings.append((seq, caption, f"scene_{seq:02d}.png"))
+            entries.append(
+                {
+                    "seq": seq,
+                    "candidates_image": [f"scene_{seq:02d}.png"],
+                    "candidates_text": split_candidates(raw_caption),
+                }
+            )
 
-    return mappings
+    return entries
+
+
+def sample_picks(pools, variant, seed=None):
+    """从每个候选池挑一个，返回与 pools 等长的列表。
+
+    对应 MoneyPrinterPlus `services/hunjian/hunjian_service.py` 的
+    `random_line_from_text_file()`——它每个场景从文本文件里随机抽一行，
+    靠组合数产出「100 条不重复」的混剪视频。
+
+    这里不用纯随机，而是 `md5(seed:variant:镜头号)` 取模：
+      · 完全可复现（同 seed + 同 variant 永远得到同一组合，可以重跑）
+      · 每一镜独立采样，所以 88 镜 × 2 候选也能铺满 2^88 的组合空间，
+        而不是像「按序号轮转」那样只有 2 种结果
+    候选池长度为 1 时恒定返回那一个，所以没有候选池的老对照表行为不变。
+    想强制"每镜都取第一个候选"，用 variant=None。
+    """
+    picks = []
+    for index, pool in enumerate(pools):
+        if not pool:
+            picks.append("")
+        elif len(pool) == 1:
+            picks.append(pool[0])
+        else:
+            picks.append(pool[_stable_pick(seed, variant, index, len(pool))])
+    return picks
+
+
+def _stable_pick(seed, variant, index, modulo):
+    """由 (seed, variant, 镜头号) 推出稳定的候选下标。"""
+    digest = hashlib.md5(
+        f"{seed or ''}:{variant}:{index}".encode("utf-8")
+    ).hexdigest()
+    return int(digest[:8], 16) % max(modulo, 1)
+
+
+def variant_fingerprint(text_picks, image_picks):
+    """一个变体的指纹，用来判重。"""
+    return tuple(zip(text_picks, image_picks))
+
+
+def distinct_variants(entries, count, seed=None, max_probe=None):
+    """生成 count 个**互不重复**的变体。
+
+    返回 [(variant, text_picks, image_picks), ...]。
+    组合空间不够 count 时，返回能拿到的全部并如实说明（不假装凑数）。
+    """
+    text_pools = [e["candidates_text"] for e in entries]
+    image_pools = [e["candidates_image"] for e in entries]
+    space = 1
+    for pool in text_pools:
+        space *= max(len(pool), 1)
+    for pool in image_pools:
+        space *= max(len(pool), 1)
+
+    max_probe = max_probe or max(count * 40, 400)
+    seen, out = set(), []
+    for variant in range(max_probe):
+        if len(out) >= count:
+            break
+        texts = sample_picks(text_pools, variant, seed)
+        images = sample_picks(image_pools, variant, seed)
+        mark = variant_fingerprint(texts, images)
+        if mark in seen:
+            continue
+        seen.add(mark)
+        out.append((variant, texts, images))
+    return out, space
+
+
+def count_variants(file_path):
+    """这份对照表能出多少种组合（各镜候选数连乘，封顶 10^9 防爆）。"""
+    total = 1
+    for entry in parse_mapping_entries(file_path):
+        total *= max(len(entry["candidates_text"]), 1) * max(len(entry["candidates_image"]), 1)
+        if total > 10 ** 9:
+            return 10 ** 9
+    return total
 
 
 def find_image_file(image_dir, filename):

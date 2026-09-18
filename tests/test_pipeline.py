@@ -464,3 +464,242 @@ class TestEndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ============================================================
+# 以下为 MoneyPrinterPlus 借鉴部分的测试
+# ============================================================
+from pipeline import agentio  # noqa: E402
+
+
+class TestYamlQuotedComment(unittest.TestCase):
+    """回归：带引号的值后面跟注释，不能把注释吃进值里。"""
+
+    def test_quoted_value_with_trailing_comment(self):
+        data = parse_simple_yaml('a: ""          # 例：教育/语言教育\nb: "x # y"  # 注释\n')
+        self.assertEqual(data["a"], "")
+        self.assertEqual(data["b"], "x # y")
+
+    def test_unbalanced_quote_raises(self):
+        with self.assertRaises(ValueError):
+            parse_simple_yaml('a: "没闭合\n')
+
+    def test_repo_config_kuaishou_domain_clean(self):
+        cfg = load_config(os.path.join(REPO_ROOT, "config.yaml"))
+        self.assertEqual(cfg["publish"]["kuaishou_domain"], "")
+
+
+class TestCandidatePool(unittest.TestCase):
+    """混剪候选池（对应 MoneyPrinterPlus hunjian_service 的随机抽行）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.mapping = os.path.join(self.tmp, "mix.txt")
+        with open(self.mapping, "w", encoding="utf-8") as handle:
+            handle.write(
+                "格式：镜头编号 | 图片文件名 | 字幕内容\n"
+                "01 | a.jpg//b.jpg | 文案甲一//文案乙一\n"
+                "02 | c.jpg | 只有一条\n"
+                "03 | d.jpg//e.jpg//f.jpg | 一//二//三\n"
+            )
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_split_candidates(self):
+        self.assertEqual(script_io.split_candidates("甲//乙//丙"), ["甲", "乙", "丙"])
+        self.assertEqual(script_io.split_candidates("只有一条"), ["只有一条"])
+        self.assertEqual(script_io.split_candidates("1/217"), ["1/217"])  # 单斜杠不拆
+
+    def test_parse_entries_keeps_pools(self):
+        entries = script_io.parse_mapping_entries(self.mapping)
+        self.assertEqual(entries[0]["candidates_text"], ["文案甲一", "文案乙一"])
+        self.assertEqual(entries[2]["candidates_image"], ["d.jpg", "e.jpg", "f.jpg"])
+        self.assertEqual(entries[1]["candidates_text"], ["只有一条"])
+
+    def test_variant_none_is_backwards_compatible(self):
+        """没有候选池的老对照表，行为必须完全不变。"""
+        legacy = script_io.parse_mapping_file(
+            os.path.join(REPO_ROOT, "剧本", "口播文案_图片序号_对应表.txt")
+        )
+        self.assertEqual(len(legacy), 88)
+        self.assertEqual(legacy[0], (1, "军训，你顺拐了四十七次。", "shot_01.jpg"))
+        self.assertEqual(
+            script_io.count_variants(
+                os.path.join(REPO_ROOT, "剧本", "口播文案_图片序号_对应表.txt")
+            ),
+            1,
+        )
+
+    def test_sample_picks_reproducible(self):
+        entries = script_io.parse_mapping_entries(self.mapping)
+        pools = [e["candidates_text"] for e in entries]
+        self.assertEqual(
+            script_io.sample_picks(pools, 3, "seed"), script_io.sample_picks(pools, 3, "seed")
+        )
+
+    def test_sample_picks_spreads_over_space(self):
+        """20 镜 × 2 候选有 2^40 组合，采样要能铺开，而不是只有 2 种结果。"""
+        path = os.path.join(self.tmp, "wide.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            for i in range(1, 21):
+                handle.write(f"{i:02d} | i{i}_a.jpg//i{i}_b.jpg | 甲{i:02d}//乙{i:02d}\n")
+        entries = script_io.parse_mapping_entries(path)
+        got, space = script_io.distinct_variants(entries, 10, seed="s1")
+        self.assertEqual(space, 2 ** 40)
+        self.assertEqual(len(got), 10)
+        marks = {script_io.variant_fingerprint(t, i) for _, t, i in got}
+        self.assertEqual(len(marks), 10, "变体之间必须互不重复")
+
+    def test_distinct_variants_degrades_honestly(self):
+        """组合空间不够时，如实返回能拿到的数量，不假装凑数。"""
+        path = os.path.join(self.tmp, "tiny.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("01 | a.jpg//b.jpg | 甲//乙\n")
+        entries = script_io.parse_mapping_entries(path)
+        got, space = script_io.distinct_variants(entries, 50, seed="s")
+        self.assertEqual(space, 4)
+        self.assertLessEqual(len(got), 4)
+
+
+class TestAgentHandoff(unittest.TestCase):
+    """Arena agent 交接协议（替代 MoneyPrinterPlus 的 LLM API）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cfg = load_config(os.path.join(REPO_ROOT, "config.yaml"))
+        self.cfg["agent"]["root"] = os.path.join(self.tmp, ".agent")
+        self.cfg["shotlist"] = dict(self.cfg["shotlist"])
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _answer(self, shots=42, chars_per_shot=32, punct=True):
+        mark = "。" if punct else ""
+        body = "字" * max(chars_per_shot - 1, 1)
+        return {
+            "story_json": {
+                "title": "测试标题",
+                "lead_text": "今天你要体验的人生副本是测试",
+                "shots": [
+                    {"text": f"第{i}镜{body}{mark}", "image_prompt": f"画面{i}"}
+                    for i in range(1, shots + 1)
+                ],
+            },
+            "keywords": ["test keyword"],
+        }
+
+    def test_create_task_writes_prompts_and_constraints(self):
+        task_id, path = agentio.create_task(self.cfg, "外卖员的一生", task_id="t1")
+        self.assertEqual(task_id, "t1")
+        with open(path, "r", encoding="utf-8") as handle:
+            task = json.load(handle)
+        self.assertEqual(task["schema"], agentio.SCHEMA)
+        self.assertTrue(os.path.exists(os.path.dirname(task["answer_path"])))
+        prompts = " ".join(t["prompt"] for t in task["tasks"])
+        # 三个移植过来的提示词主题都在
+        self.assertIn("外卖员的一生", prompts)
+        self.assertIn("English keywords", prompts)
+        self.assertEqual(task["constraints"]["story_min_chars"], 1200)
+
+    def test_validate_catches_short_story(self):
+        constraints = {"min_shots": 40, "max_shots": 90, "shot_min_chars": 12,
+                       "shot_max_chars": 60, "story_min_chars": 1200, "story_max_chars": 2500}
+        errors, shots, lead, title = agentio.validate_answer(self._answer(chars_per_shot=20), constraints)
+        self.assertTrue(any("总净字数" in e for e in errors), errors)
+
+    def test_validate_catches_missing_punctuation(self):
+        constraints = {"min_shots": 1, "max_shots": 90, "shot_min_chars": 12,
+                       "shot_max_chars": 60, "story_min_chars": 1, "story_max_chars": 99999}
+        errors, *_ = agentio.validate_answer(self._answer(shots=2, punct=False), constraints)
+        self.assertTrue(any("没有标点" in e for e in errors), errors)
+
+    def test_validate_catches_too_few_shots(self):
+        constraints = {"min_shots": 40, "max_shots": 90, "shot_min_chars": 12,
+                       "shot_max_chars": 60, "story_min_chars": 1, "story_max_chars": 99999}
+        errors, *_ = agentio.validate_answer(self._answer(shots=5), constraints)
+        self.assertTrue(any("少于要求的 40 镜" in e for e in errors), errors)
+
+    def test_validate_catches_missing_lead(self):
+        constraints = {"min_shots": 1, "max_shots": 90, "shot_min_chars": 12,
+                       "shot_max_chars": 60, "story_min_chars": 1, "story_max_chars": 99999}
+        answer = self._answer(shots=2)
+        answer["story_json"]["lead_text"] = ""
+        errors, *_ = agentio.validate_answer(answer, constraints)
+        self.assertTrue(any("lead_text" in e for e in errors), errors)
+
+    def test_apply_answer_roundtrip(self):
+        """出题 → 答题 → 收卷 → 产出的对照表能被解析器读回来。"""
+        agentio.create_task(self.cfg, "测试主题", task_id="t2")
+        done_dir = os.path.join(self.tmp, ".agent", "done")
+        os.makedirs(done_dir, exist_ok=True)
+        with open(os.path.join(done_dir, "t2.json"), "w", encoding="utf-8") as handle:
+            json.dump(self._answer(shots=42, chars_per_shot=32), handle, ensure_ascii=False)
+
+        out_dir = os.path.join(self.tmp, "剧本")
+        result = agentio.apply_answer(self.cfg, "t2", out_dir=out_dir, log=lambda *_: None)
+        self.assertTrue(result["ok"], result.get("errors"))
+        self.assertEqual(len(result["shots"]), 42)
+        self.assertEqual(result["title"], "测试标题")
+        self.assertTrue(os.path.exists(result["mapping_path"]))
+        self.assertTrue(os.path.exists(result["prompt_path"]))
+
+        parsed = script_io.parse_mapping_file(result["mapping_path"])
+        self.assertEqual(len(parsed), 42)
+        self.assertEqual(parsed[0][2], "shot_01.jpg")
+        # 标题/引导语写进了头部，发布清单要读它
+        with open(result["mapping_path"], "r", encoding="utf-8") as handle:
+            head = handle.read(300)
+        self.assertIn("标题：测试标题", head)
+        self.assertIn("引导语（片头文案）：", head)
+
+    def test_apply_answer_rejects_bad_output(self):
+        agentio.create_task(self.cfg, "测试主题", task_id="t3")
+        done_dir = os.path.join(self.tmp, ".agent", "done")
+        os.makedirs(done_dir, exist_ok=True)
+        with open(os.path.join(done_dir, "t3.json"), "w", encoding="utf-8") as handle:
+            json.dump(self._answer(shots=3, chars_per_shot=5), handle, ensure_ascii=False)
+        result = agentio.apply_answer(self.cfg, "t3", log=lambda *_: None)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["errors"])
+
+    def test_missing_answer_gives_actionable_error(self):
+        agentio.create_task(self.cfg, "测试主题", task_id="t4")
+        with self.assertRaises(FileNotFoundError) as ctx:
+            agentio.apply_answer(self.cfg, "t4", log=lambda *_: None)
+        message = str(ctx.exception)
+        # 报错要指到具体缺哪个文件、该让谁去补
+        self.assertIn("t4.json", message)
+        self.assertIn("agent", message)
+
+
+class TestPublishManifest(unittest.TestCase):
+    """发布清单（对应 MoneyPrinterPlus 的 publisher 元数据，但不做自动发布）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_manifest_written_with_platform_rows(self):
+        from pipeline.pipeline import _export_publish_manifest
+
+        cfg = load_config(os.path.join(REPO_ROOT, "config.yaml"))
+        cfg["run"]["report_dir"] = self.tmp
+        mapping = os.path.join(self.tmp, "m.txt")
+        with open(mapping, "w", encoding="utf-8") as handle:
+            handle.write("标题：外卖员的一生\n引导语（片头文案）：今天你要体验的是\n\n")
+        result = {
+            "project_name": "测试片", "total_s": 299.7, "opening_us": 5500000,
+            "shots": 47, "draft_path": "/tmp/x", "style": "mask_flash",
+            "speaker": "ICL_zh_male_momodianying",
+        }
+        path = _export_publish_manifest(result, cfg, mapping)
+        self.assertTrue(os.path.exists(path))
+        content = open(path, encoding="utf-8").read()
+        self.assertIn("外卖员的一生", content)
+        for platform in ("douyin", "kuaishou", "xiaohongshu", "shipinhao"):
+            self.assertIn(platform, content)
+        self.assertIn("今天你要体验的是", content)
+        self.assertIn("#人生副本", content)
