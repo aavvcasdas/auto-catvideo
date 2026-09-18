@@ -3,6 +3,7 @@ __pycache__/
 
 # 运行产物（output/draft_content.json 是仓库里原有的样例，保持跟踪）
 output/run_report_*.json
+output/发布清单_*.md
 output/*.srt
 .cache/
 
